@@ -255,10 +255,7 @@ impl Backend for ZigPlugin {
         ]
     }
 
-    async fn _list_remote_versions_with_info(
-        &self,
-        _config: &Arc<Config>,
-    ) -> Result<Vec<VersionInfo>> {
+    async fn _list_remote_versions(&self, _config: &Arc<Config>) -> Result<Vec<VersionInfo>> {
         let indexes = [
             "https://ziglang.org/download/index.json",
             // "https://machengine.org/zig/index.json", // need to handle mach's CalVer
@@ -408,6 +405,7 @@ impl Backend for ZigPlugin {
                 checksum,
                 size,
                 url_api: None,
+                conda_deps: None,
             }),
             Err(_) if regex!(r"^\d+\.\d+\.\d+$").is_match(&tv.version) => {
                 // Fallback: construct URL directly for numbered versions (no checksum available)
@@ -419,6 +417,7 @@ impl Backend for ZigPlugin {
                     checksum: None,
                     size: None,
                     url_api: None,
+                    conda_deps: None,
                 })
             }
             Err(_) => Ok(PlatformInfo::default()),

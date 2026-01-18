@@ -22,7 +22,7 @@ so make sure before you start working on something it won't be a wasted effort.
 
 1. **PR titles**: Must follow conventional commit format (validated
    automatically)
-   - For new tools in registry: Use `registry: add tool-name`
+   - For new tools in registry: Use `registry: add tool-name (backend:full/name)`
 2. **Auto-formatting**: Code will be automatically formatted by autofix.ci
 3. **CI checks**: All tests must pass across Linux, macOS, and Windows
 4. **Coverage**: New code should maintain or improve test coverage
@@ -644,7 +644,7 @@ of the full backend specification.
 
    - **[aqua](dev-tools/backends/aqua.md)** - Preferred for GitHub releases with security
      features
-   - **[ubi](dev-tools/backends/ubi.md)** - Simple GitHub/GitLab releases following
+   - **[github](dev-tools/backends/github.md)** - Simple GitHub releases following
      standard conventions
    - **Language package managers** - `npm`, `pipx`, `cargo`, `gem`, etc. for
      ecosystem-specific tools
@@ -654,9 +654,10 @@ of the full backend specification.
 2. **Add to registry.toml**:
 
    ```toml
-   your-tool.description = "Brief description of the tool"
-   your-tool.backends = ["aqua:owner/repo", "ubi:owner/repo"]
-   your-tool.test = ["your-tool --version", "{{version}}"]
+   [tools.your-tool]
+   description = "Brief description of the tool"
+   backends = ["aqua:owner/repo", "github:owner/repo"]
+   test = ["your-tool --version", "{{version}}"]
    ```
 
 3. **Test the tool** works properly with `mise test-tool your-tool`
@@ -666,7 +667,7 @@ of the full backend specification.
 When adding a new tool, the following requirements apply (automatically
 enforced by [GitHub Actions workflow](https://github.com/jdx/mise/blob/main/.github/workflows/registry_comment.yml)):
 
-- **New asdf plugins are not accepted** - Use aqua/ubi instead
+- **New asdf plugins are not accepted** - Use aqua/github instead
 - **A test is required in `registry.toml`** - Must include a `test` field to
   verify installation
 - **Tools may be rejected if they are not notable** - The tool should be
@@ -679,19 +680,20 @@ enforced by [GitHub Actions workflow](https://github.com/jdx/mise/blob/main/.git
 The `registry.toml` file uses this format:
 
 ```toml
-# Tool name (becomes the short name for `mise use`)
-your-tool.description = "Tool description"
-your-tool.backends = [
+# Tool name "your-tool" (becomes the short name for `mise use`)
+[tools.your-tool]
+description = "Tool description"
+backends = [
     "aqua:owner/repo",           # Preferred backend first
-    "ubi:owner/repo",            # Fallback backends
+    "github:owner/repo",         # Fallback backends
     "npm:package-name"           # Multiple backends supported
 ]
-your-tool.test = [
+test = [
     "your-tool --version",       # Command to run
     "{{version}}"                # Expected output pattern
 ]
-your-tool.aliases = ["alt-name"] # Optional alternative names
-your-tool.os = ["linux", "macos"] # Optional OS restrictions
+aliases = ["alt-name"] # Optional alternative names
+os = ["linux", "macos"] # Optional OS restrictions
 ```
 
 ### Backend Priority
@@ -704,7 +706,7 @@ backend, but can override with explicit syntax like `mise use aqua:owner/repo`.
 All tools must include a test to verify proper installation:
 
 ```toml
-your-tool.test = [
+test = [
     "command-to-run",
     "expected-output-pattern"
 ]
@@ -717,18 +719,20 @@ The test command should be reliable and the output pattern should use
 
 Recent tool additions:
 
-- **DuckDB**: Simple ubi backend ([#4248](https://github.com/jdx/mise/pull/4248))
+- **DuckDB**: Simple github backend ([#4248](https://github.com/jdx/mise/pull/4248))
 
   ```toml
-  duckdb.backends = ["ubi:duckdb/duckdb"]
-  duckdb.test = ["duckdb --version", "{{version}}"]
+  [tools.duckdb]
+  backends = ["github:duckdb/duckdb"]
+  test = ["duckdb --version", "{{version}}"]
   ```
 
 - **Biome**: Multiple backends ([#4283](https://github.com/jdx/mise/pull/4283))
 
   ```toml
-  biome.backends = ["aqua:biomejs/biome", "ubi:biomejs/biome"]
-  biome.test = ["biome --version", "Version: {{version}}"]
+  [tools.biome]
+  backends = ["aqua:biomejs/biome", "github:biomejs/biome"]
+  test = ["biome --version", "Version: {{version}}"]
   ```
 
 ## Adding Backends
@@ -737,7 +741,7 @@ Recent tool additions:
 **Most contributors want to add tools, not backends.** Before reading this
 section, make sure you actually need a new backend. Tools are individual
 software packages (like `node` or `ripgrep`), while backends are installation
-mechanisms (like `aqua` or `ubi`). If you want to add a specific tool to mise,
+mechanisms (like `aqua` or `github`). If you want to add a specific tool to mise,
 see [Adding Tools](#adding-tools) instead.
 :::
 
@@ -750,12 +754,12 @@ If you need a custom backend:
 
 1. **Discuss with jdx first** in [Discord](https://discord.gg/UBa7pJUN7Z) or by
    creating a [discussion](https://github.com/jdx/mise/discussions)
-2. **Consider if existing backends** (ubi, aqua, npm, pipx, etc.) can meet your
+2. **Consider if existing backends** (github, aqua, npm, pipx, etc.) can meet your
    needs
 3. **Create a plugin** - use the [plugin system](tool-plugin-development.md) to create plugins for private/custom tools without core changes. Start with the [mise-tool-plugin-template](https://github.com/jdx/mise-tool-plugin-template) for a quick setup
 
 Most tool installation needs can be met by existing backends, especially
-[ubi](dev-tools/backends/ubi.md) for GitHub releases and
+[github](dev-tools/backends/github.md) for GitHub releases and
 [aqua](dev-tools/backends/aqua.md) for comprehensive package management.
 :::
 
@@ -769,7 +773,7 @@ across different installation systems.
   Node.js, Python, Ruby
 - **Package Manager Backends** (`src/backend/`) - npm, pipx, cargo, gem, go
   modules
-- **Universal Installers** (`src/backend/`) - ubi, aqua for GitHub releases and
+- **Universal Installers** (`src/backend/`) - github, aqua for GitHub releases and
   package management
 - **Plugin Backends** (`src/backend/`) - plugins can provide custom backends or individual tools
 
@@ -835,7 +839,7 @@ across different installation systems.
 
 Look at existing backends for patterns:
 
-- `src/backend/ubi.rs` - Simple GitHub release installer
+- `src/backend/github.rs` - Simple GitHub release installer
 - `src/backend/npm.rs` - Package manager integration
 - `src/backend/core/node.rs` - Full language runtime implementation
 

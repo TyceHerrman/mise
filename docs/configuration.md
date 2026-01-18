@@ -48,7 +48,7 @@ When mise needs configuration, it follows this process:
 
 ```
 /
-├── etc/mise/                          # System-wide config (highest precedence)
+├── etc/mise/                         # System-wide config (highest precedence)
 │   ├── conf.d/*.toml                 # System fragments, loaded alphabetically
 │   ├── config.toml                   # System defaults
 │   └── config.<env>.toml             # Env-specific system config (MISE_ENV or -E)
@@ -108,6 +108,27 @@ Different configuration sections merge in different ways:
 
 ::: tip
 Run `mise config` to see what files mise has loaded in order of precedence.
+:::
+
+### Target File for Write Operations
+
+When commands like [`mise use`](/cli/use), [`mise set`](/cli/set), or [`mise unuse`](/cli/unuse) need to write to a config file, they use the **lowest precedence file in the highest precedence directory**. This means:
+
+- If both `mise.toml` and `mise.local.toml` exist, writes go to `mise.toml`
+- If both `mise.toml` and `mise.production.toml` exist, writes go to `mise.toml`
+- If only `mise.local.toml` exists, writes go to `mise.local.toml`
+
+This behavior ensures that shared configuration (`mise.toml`) is updated by default, while local overrides (`mise.local.toml`) and environment-specific configs remain untouched unless explicitly targeted.
+
+::: info Example
+
+```bash
+# With both mise.toml and mise.local.toml present:
+$ mise use node@22              # writes to mise.toml
+$ mise use --env local node@20  # writes to mise.local.toml
+$ mise set NODE_ENV=production  # writes to mise.toml
+```
+
 :::
 
 Here is what a `mise.toml` looks like:
@@ -275,7 +296,7 @@ See [Monorepo Tasks](/tasks/monorepo) for detailed usage and examples.
 ### `mise.toml` schema
 
 - You can find the JSON schema for `mise.toml` in [schema/mise.json](https://github.com/jdx/mise/blob/main/schema/mise.json) or at <https://mise.jdx.dev/schema/mise.json>.
-- Some editors can load it automatically to provide autocompletion and validation for when editing a `mise.toml` file ([VSCode](https://code.visualstudio.com/docs/languages/json#_json-schemas-and-settings), [IntelliJ](https://www.jetbrains.com/help/idea/json.html#ws_json_using_schemas), [neovim](https://github.com/b0o/SchemaStore.nvim), etc.). It is also available in the [JSON schema store](https://www.schemastore.org/json/).
+- Some editors can load it automatically to provide autocompletion and validation for when editing a `mise.toml` file ([VSCode](https://code.visualstudio.com/docs/languages/json#_json-schemas-and-settings), [IntelliJ](https://www.jetbrains.com/help/idea/json.html#ws_json_using_schemas), [neovim](https://github.com/b0o/SchemaStore.nvim), etc.). It is also available in the [JSON schema store](https://www.schemastore.org/).
 - Note that for `included tasks` (see [task configuration](/tasks/task-configuration), there is another schema: <https://mise.jdx.dev/schema/mise-task.json>)
 
 ## Global config: `~/.config/mise/config.toml`

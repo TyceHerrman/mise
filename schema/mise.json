@@ -97,8 +97,17 @@
                 "description": "redact the value from logs"
               },
               "required": {
-                "type": "boolean",
-                "description": "require this environment variable to be defined before mise runs or in a later config file. Cannot be used with empty string values or value=false"
+                "oneOf": [
+                  {
+                    "type": "boolean",
+                    "description": "require this environment variable to be defined before mise runs or in a later config file"
+                  },
+                  {
+                    "type": "string",
+                    "description": "require this environment variable with user help text on how to set it"
+                  }
+                ],
+                "description": "require this environment variable to be defined before mise runs or in a later config file. Cannot be used with empty string values or value=false. Can be a boolean or a help string."
               }
             }
           },
@@ -489,6 +498,14 @@
           "description": "Path to change to after launching mise",
           "type": "string"
         },
+        "ceiling_paths": {
+          "default": [],
+          "description": "Directories where mise stops searching for config files.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
         "ci": {
           "default": "false",
           "description": "Set to true if running in a CI environment",
@@ -633,6 +650,27 @@
           "description": "Path which is used as `{{config_root}}` for the global config file. Default is `$HOME`. This must be an env var.",
           "type": "string"
         },
+        "github": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "github_attestations": {
+              "default": true,
+              "description": "Enable GitHub Artifact Attestations verification for github backend tools.",
+              "type": "boolean"
+            },
+            "slsa": {
+              "default": true,
+              "description": "Enable SLSA provenance verification for github backend tools.",
+              "type": "boolean"
+            }
+          }
+        },
+        "slsa": {
+          "default": true,
+          "description": "Enable SLSA provenance verification globally.",
+          "type": "boolean"
+        },
         "go_default_packages_file": {
           "default": "~/.default-go-packages",
           "description": "Path to a file containing default go packages to install when installing go",
@@ -668,6 +706,11 @@
         },
         "gpg_verify": {
           "description": "Use gpg to verify all tool signatures.",
+          "type": "boolean"
+        },
+        "github_attestations": {
+          "default": true,
+          "description": "Enable GitHub Artifact Attestations verification for supported tools.",
           "type": "boolean"
         },
         "http_timeout": {
@@ -780,6 +823,14 @@
           "description": "Path to the netrc file to use for HTTP Basic authentication.",
           "type": "string"
         },
+        "no_env": {
+          "description": "Do not load environment variables from config files.",
+          "type": "boolean"
+        },
+        "no_hooks": {
+          "description": "Do not execute hooks from config files.",
+          "type": "boolean"
+        },
         "node": {
           "type": "object",
           "additionalProperties": false,
@@ -829,7 +880,7 @@
         },
         "override_config_filenames": {
           "default": [],
-          "description": "If set, mise will ignore default config files like `mise.toml` and use these filenames instead. This must be an env var.",
+          "description": "If set, mise will ignore default config files like `mise.toml` and use these filenames instead.",
           "type": "array",
           "items": {
             "type": "string"
@@ -837,7 +888,7 @@
         },
         "override_tool_versions_filenames": {
           "default": [],
-          "description": "If set, mise will ignore .tool-versions files and use these filenames instead. Can be set to `none` to disable .tool-versions. This must be an env var.",
+          "description": "If set, mise will ignore .tool-versions files and use these filenames instead. Can be set to `none` to disable .tool-versions.",
           "type": "array",
           "items": {
             "type": "string"
@@ -1034,6 +1085,10 @@
               "description": "[experimental] URL template or GitHub repo for precompiled Ruby binaries.",
               "type": "string"
             },
+            "github_attestations": {
+              "description": "[experimental] Enable GitHub Artifact Attestations verification for precompiled Ruby binaries.",
+              "type": "boolean"
+            },
             "ruby_build_opts": {
               "description": "Options to pass to ruby-build.",
               "type": "string"
@@ -1118,11 +1173,11 @@
           "additionalProperties": false,
           "properties": {
             "age_key": {
-              "description": "The age private key to use for sops secret decryption.",
+              "description": "The age private key to use for sops secret decryption. Takes precedence over standard SOPS_AGE_KEY environment variable.",
               "type": "string"
             },
             "age_key_file": {
-              "description": "Path to the age private key file to use for sops secret decryption.",
+              "description": "Path to the age private key file for sops secret decryption. Takes precedence over standard SOPS_AGE_KEY_FILE environment variable.",
               "type": "string"
             },
             "age_recipients": {
@@ -1238,6 +1293,10 @@
           "description": "Show completion message with elapsed time for each task on `mise run`. Default shows when output type is `prefix`.",
           "type": "boolean"
         },
+        "task_show_full_cmd": {
+          "description": "Disable truncation of command lines in task execution output. When true, the full command line will be shown.",
+          "type": "boolean"
+        },
         "trace": {
           "description": "Sets log level to trace",
           "type": "boolean"
@@ -1333,6 +1392,11 @@
           "type": "object",
           "additionalProperties": false,
           "properties": {
+            "disable_spec_from_run_scripts": {
+              "default": false,
+              "description": "Opt out of parsing task run scripts to infer the usage spec (arguments and flags). When enabled, mise will derive the usage spec only from the `usage` field, ignoring any `arg()`, `option()`, or `flag()` templates used in run scripts. This can restore previous behavior and avoid the extra template pass over run scripts when collecting specs.",
+              "type": "boolean"
+            },
             "monorepo_depth": {
               "default": 5,
               "description": "Maximum depth to search for task files in monorepo subdirectories.",
@@ -1725,9 +1789,9 @@
           "type": "string"
         },
         "includes": {
-          "description": "files/directories to include searching for tasks",
+          "description": "files/directories to include searching for tasks. Can be local paths or git repository URLs using git:: prefix (e.g., git::https://github.com/org/repo.git//path?ref=branch)",
           "items": {
-            "description": "file/directory root to include in task execution",
+            "description": "file/directory root to include in task execution. Supports local paths and git URLs (git::https://github.com/org/repo.git//path?ref=branch)",
             "type": "string"
           },
           "type": "array"
@@ -1737,6 +1801,20 @@
     "experimental_monorepo_root": {
       "description": "Marks this config as a monorepo root, enabling target path syntax for tasks. Requires MISE_EXPERIMENTAL=1. When enabled, tasks can be referenced with paths like //projects/frontend:build",
       "type": "boolean"
+    },
+    "monorepo": {
+      "description": "Configuration for monorepo task discovery",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "config_roots": {
+          "description": "Explicit list of config root paths for monorepo task discovery. Supports single-level glob patterns (*). When set, skips filesystem walking for better performance.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
     },
     "tool": {
       "oneOf": [
@@ -1883,6 +1961,65 @@
           }
         }
       }
+    },
+    "prepare_provider": {
+      "type": "object",
+      "properties": {
+        "auto": {
+          "type": "boolean",
+          "default": false,
+          "description": "Auto-run before `mise x` and `mise run`"
+        },
+        "sources": {
+          "oneOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          ],
+          "description": "Files/patterns to check for changes"
+        },
+        "outputs": {
+          "oneOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          ],
+          "description": "Files/directories that should be newer than sources"
+        },
+        "run": {
+          "type": "string",
+          "description": "Command to run when stale"
+        },
+        "env": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Environment variables to set"
+        },
+        "dir": {
+          "type": "string",
+          "description": "Working directory for the command"
+        },
+        "description": {
+          "type": "string",
+          "description": "Description shown in output"
+        }
+      },
+      "additionalProperties": false,
+      "description": "Prepare provider configuration"
     }
   },
   "additionalProperties": false,
@@ -1929,6 +2066,14 @@
         ]
       }
     },
+    "shell_alias": {
+      "description": "shell aliases",
+      "type": "object",
+      "additionalProperties": {
+        "description": "command to run",
+        "type": "string"
+      }
+    },
     "env": {
       "oneOf": [
         {
@@ -1944,6 +2089,9 @@
     },
     "experimental_monorepo_root": {
       "$ref": "#/$defs/experimental_monorepo_root"
+    },
+    "monorepo": {
+      "$ref": "#/$defs/monorepo"
     },
     "min_version": {
       "description": "minimum version of mise required to use this config",
@@ -1984,6 +2132,52 @@
       },
       "description": "plugins to use",
       "type": "object"
+    },
+    "prepare": {
+      "type": "object",
+      "properties": {
+        "disable": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Disable specific prepare providers"
+        },
+        "npm": {
+          "$ref": "#/$defs/prepare_provider"
+        },
+        "yarn": {
+          "$ref": "#/$defs/prepare_provider"
+        },
+        "pnpm": {
+          "$ref": "#/$defs/prepare_provider"
+        },
+        "bun": {
+          "$ref": "#/$defs/prepare_provider"
+        },
+        "go": {
+          "$ref": "#/$defs/prepare_provider"
+        },
+        "pip": {
+          "$ref": "#/$defs/prepare_provider"
+        },
+        "poetry": {
+          "$ref": "#/$defs/prepare_provider"
+        },
+        "uv": {
+          "$ref": "#/$defs/prepare_provider"
+        },
+        "bundler": {
+          "$ref": "#/$defs/prepare_provider"
+        },
+        "composer": {
+          "$ref": "#/$defs/prepare_provider"
+        }
+      },
+      "additionalProperties": {
+        "$ref": "#/$defs/prepare_provider"
+      },
+      "description": "configure prepare providers"
     },
     "settings": {
       "$ref": "#/$defs/settings",

@@ -64,46 +64,118 @@ impl Backend for AquaBackend {
 
         let mut features = vec![];
 
-        // Checksum
-        if let Some(checksum) = &pkg.checksum
-            && checksum.enabled()
-        {
-            features.push(SecurityFeature::Checksum {
-                algorithm: checksum.algorithm.as_ref().map(|a| a.to_string()),
-            });
+        // Check base package and all version overrides for security features
+        // This gives a complete picture of available security features across all versions
+        let all_pkgs: Vec<&AquaPackage> = std::iter::once(&pkg)
+            .chain(pkg.version_overrides.iter())
+            .collect();
+
+        // Fetch release assets to detect actual security features
+        let release_assets = if !pkg.repo_owner.is_empty() && !pkg.repo_name.is_empty() {
+            let repo = format!("{}/{}", pkg.repo_owner, pkg.repo_name);
+            github::list_releases(&repo)
+                .await
+                .ok()
+                .and_then(|releases| releases.first().cloned())
+                .map(|r| r.assets)
+                .unwrap_or_default()
+        } else {
+            vec![]
+        };
+
+        // Checksum - check registry config OR actual release assets
+        let has_checksum_config = all_pkgs.iter().any(|p| {
+            p.checksum
+                .as_ref()
+                .is_some_and(|checksum| checksum.enabled())
+        });
+        let has_checksum_assets = release_assets.iter().any(|a| {
+            let name = a.name.to_lowercase();
+            name.contains("sha256")
+                || name.contains("checksum")
+                || name.ends_with(".sha256")
+                || name.ends_with(".sha512")
+        });
+        if has_checksum_config || has_checksum_assets {
+            let algorithm = all_pkgs
+                .iter()
+                .filter_map(|p| p.checksum.as_ref())
+                .find_map(|c| c.algorithm.as_ref().map(|a| a.to_string()))
+                .or_else(|| {
+                    if has_checksum_assets {
+                        Some("sha256".to_string())
+                    } else {
+                        None
+                    }
+                });
+            features.push(SecurityFeature::Checksum { algorithm });
         }
 
-        // GitHub Attestations
-        if let Some(attestations) = &pkg.github_artifact_attestations
-            && attestations.enabled.unwrap_or(false)
-        {
-            features.push(SecurityFeature::GithubAttestations {
-                signer_workflow: attestations.signer_workflow.clone(),
-            });
+        // GitHub Attestations - check registry config OR actual release assets
+        let has_attestations_config = all_pkgs.iter().any(|p| {
+            p.github_artifact_attestations
+                .as_ref()
+                .is_some_and(|a| a.enabled.unwrap_or(true))
+        });
+        let has_attestations_assets = release_assets.iter().any(|a| {
+            let name = a.name.to_lowercase();
+            name.ends_with(".sigstore.json") || name.ends_with(".sigstore")
+        });
+        if has_attestations_config || has_attestations_assets {
+            let signer_workflow = all_pkgs
+                .iter()
+                .filter_map(|p| p.github_artifact_attestations.as_ref())
+                .find_map(|a| a.signer_workflow.clone());
+            features.push(SecurityFeature::GithubAttestations { signer_workflow });
         }
 
-        // SLSA
-        if let Some(slsa) = &pkg.slsa_provenance
-            && slsa.enabled.unwrap_or(false)
-        {
-            features.push(SecurityFeature::Slsa);
+        // SLSA - check registry config OR actual release assets
+        let has_slsa_config = all_pkgs.iter().any(|p| {
+            p.slsa_provenance
+                .as_ref()
+                .is_some_and(|s| s.enabled.unwrap_or(true))
+        });
+        let has_slsa_assets = release_assets.iter().any(|a| {
+            let name = a.name.to_lowercase();
+            name.contains(".intoto.jsonl")
+                || name.contains("provenance")
+                || name.ends_with(".attestation")
+        });
+        if has_slsa_config || has_slsa_assets {
+            features.push(SecurityFeature::Slsa { level: None });
         }
 
-        // Cosign (nested in checksum)
-        if let Some(checksum) = &pkg.checksum
-            && let Some(cosign) = &checksum.cosign
-            && cosign.enabled.unwrap_or(false)
-        {
+        // Cosign (nested in checksum) - check registry config OR actual release assets
+        let has_cosign_config = all_pkgs.iter().any(|p| {
+            p.checksum
+                .as_ref()
+                .and_then(|c| c.cosign.as_ref())
+                .is_some_and(|cosign| cosign.enabled.unwrap_or(true))
+        });
+        let has_cosign_assets = release_assets.iter().any(|a| {
+            let name = a.name.to_lowercase();
+            name.ends_with(".sig") || name.contains("cosign")
+        });
+        if has_cosign_config || has_cosign_assets {
             features.push(SecurityFeature::Cosign);
         }
 
-        // Minisign
-        if let Some(minisign) = &pkg.minisign
-            && minisign.enabled.unwrap_or(false)
-        {
-            features.push(SecurityFeature::Minisign {
-                public_key: minisign.public_key.clone(),
-            });
+        // Minisign - check registry config OR actual release assets
+        let has_minisign_config = all_pkgs.iter().any(|p| {
+            p.minisign
+                .as_ref()
+                .is_some_and(|m| m.enabled.unwrap_or(true))
+        });
+        let has_minisign_assets = release_assets.iter().any(|a| {
+            let name = a.name.to_lowercase();
+            name.ends_with(".minisig")
+        });
+        if has_minisign_config || has_minisign_assets {
+            let public_key = all_pkgs
+                .iter()
+                .filter_map(|p| p.minisign.as_ref())
+                .find_map(|m| m.public_key.clone());
+            features.push(SecurityFeature::Minisign { public_key });
         }
 
         features
@@ -113,10 +185,7 @@ impl Backend for AquaBackend {
         &self.ba
     }
 
-    async fn _list_remote_versions_with_info(
-        &self,
-        _config: &Arc<Config>,
-    ) -> Result<Vec<VersionInfo>> {
+    async fn _list_remote_versions(&self, _config: &Arc<Config>) -> Result<Vec<VersionInfo>> {
         let pkg = match AQUA_REGISTRY.package(&self.id).await {
             Ok(pkg) => pkg,
             Err(e) => {
@@ -481,6 +550,7 @@ impl Backend for AquaBackend {
             checksum,
             size: None,
             url_api: None,
+            conda_deps: None,
         })
     }
 }
@@ -837,7 +907,7 @@ impl AquaBackend {
         v: &str,
         filename: &str,
     ) -> Result<()> {
-        if !Settings::get().aqua.slsa {
+        if !Settings::get().aqua.minisign {
             return Ok(());
         }
         if let Some(minisign) = &pkg.minisign {
@@ -894,7 +964,8 @@ impl AquaBackend {
         v: &str,
         filename: &str,
     ) -> Result<()> {
-        if !Settings::get().aqua.slsa {
+        let settings = Settings::get();
+        if !settings.slsa || !settings.aqua.slsa {
             return Ok(());
         }
         if let Some(slsa) = &pkg.slsa_provenance {
@@ -996,8 +1067,9 @@ impl AquaBackend {
         _v: &str,
         filename: &str,
     ) -> Result<()> {
-        // Check if attestations are enabled via settings
-        if !Settings::get().aqua.github_attestations {
+        // Check if attestations are enabled via global and aqua-specific settings
+        let settings = Settings::get();
+        if !settings.github_attestations || !settings.aqua.github_attestations {
             debug!("GitHub attestations verification disabled");
             return Ok(());
         }
@@ -1382,8 +1454,12 @@ impl AquaBackend {
                     .into_iter()
                     .flatten()
                     .map(|src| tv.install_path().join(src))
-                    .map(|src| {
-                        let dst = src.parent().unwrap().join(f.name.as_str());
+                    .map(|mut src| {
+                        let mut dst = src.parent().unwrap().join(f.name.as_str());
+                        if cfg!(windows) && pkg.complete_windows_ext {
+                            src = src.with_extension("exe");
+                            dst = dst.with_extension("exe");
+                        }
                         (src, dst)
                     }))
             })

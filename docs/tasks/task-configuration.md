@@ -75,7 +75,7 @@ run = "cargo build"
 
 ### `depends`
 
-- **Type**: `string | string[]`
+- **Type**: `string | string[] | { task: string, args?: string[], env?: { [key]: string } }[]`
 
 Tasks that must be run before this task. This is a list of task names or aliases. Arguments can be
 passed to the task, e.g.: `depends = ["build --release"]`. If multiple tasks have the same dependency,
@@ -90,9 +90,46 @@ depends = ["build"]
 run = "cargo test"
 ```
 
+#### Passing environment variables to dependencies
+
+You can pass environment variables to specific dependencies using two syntaxes:
+
+**Shell-style inline:**
+
+```mise-toml
+[tasks.test]
+depends = ["NODE_ENV=test setup"]
+run = "npm test"
+
+[tasks.setup]
+run = 'echo "Setting up for $NODE_ENV"'
+```
+
+**Structured object format:**
+
+```mise-toml
+[tasks.test]
+depends = [
+  { task = "setup", env = { NODE_ENV = "test", DEBUG = "true" } }
+]
+run = "npm test"
+```
+
+The structured format also supports combining env vars with arguments:
+
+```mise-toml
+[tasks.deploy]
+depends = [
+  { task = "build", args = ["--release"], env = { RUSTFLAGS = "-C opt-level=3" } }
+]
+run = "./deploy.sh"
+```
+
+Note: These environment variables are passed only to the specified dependency, not to the current task or other dependencies.
+
 ### `depends_post`
 
-- **Type**: `string | string[]`
+- **Type**: `string | string[] | { task: string, args?: string[], env?: { [key]: string } }[]`
 
 Like `depends` but these tasks run _after_ this task and its dependencies complete. For example, you
 may want a `postlint` task that you can run individually without also running `lint`:
@@ -105,9 +142,11 @@ depends_post = ["postlint"]
 run = "echo 'linting complete'"
 ```
 
+Supports the same argument and environment variable syntax as `depends`.
+
 ### `wait_for`
 
-- **Type**: `string | string[]`
+- **Type**: `string | string[] | { task: string, args?: string[], env?: { [key]: string } }[]`
 
 Similar to `depends`, it will wait for these tasks to complete before running however they won't be
 added to the list of tasks to run. This is essentially optional dependencies.
@@ -117,6 +156,8 @@ added to the list of tasks to run. This is essentially optional dependencies.
 wait_for = ["render"] # creates some js files, so if it's running, wait for it to finish
 run = "eslint ."
 ```
+
+Supports the same argument and environment variable syntax as `depends`.
 
 ### `env`
 
@@ -478,6 +519,42 @@ run = "echo task4"
 :::
 
 If you want auto-completion/validation in included toml tasks files, you can use the following JSON schema: <https://mise.jdx.dev/schema/mise-task.json>
+
+#### Remote Git Includes <Badge type="warning" text="experimental" />
+
+You can include directories of tasks from git repositories using the `git::` URL syntax:
+
+::: code-group
+
+```mise-toml [ssh]
+[task_config]
+includes = [
+    "git::ssh://git@github.com/myorg/shared-tasks.git//tasks?ref=v1.0.0"
+]
+```
+
+```mise-toml [https]
+[task_config]
+includes = [
+    "git::https://github.com/myorg/shared-tasks.git//tasks?ref=main"
+]
+```
+
+:::
+
+URL format: `git::<protocol>://<url>//<path>?<ref>`
+
+Required fields:
+
+- `protocol`: The git protocol (ssh or https).
+- `url`: The git repository URL.
+- `path`: The path to the directory in the repository.
+
+Optional fields:
+
+- `ref`: The git reference (branch, tag, commit). Defaults to the repository's default branch.
+
+The repository will be cloned and cached in `MISE_CACHE_DIR/remote-git-tasks-cache`. Tasks from the included directory will be loaded as if they were local file tasks. You can disable caching with `MISE_TASK_REMOTE_NO_CACHE=true` or the `--no-cache` flag.
 
 ## Monorepo Support <Badge type="warning" text="experimental" />
 

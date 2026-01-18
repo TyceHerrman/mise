@@ -44,7 +44,7 @@ mise install github:user/repo
 ```
 
 ::: tip
-The autodetection logic is implemented in [`src/backend/asset_detector.rs`](https://github.com/jdx/mise/blob/main/src/backend/asset_detector.rs), which is shared by both the GitHub and GitLab backends.
+The autodetection logic is implemented in [`src/backend/asset_matcher.rs`](https://github.com/jdx/mise/blob/main/src/backend/asset_matcher.rs), which is shared by both the GitHub and GitLab backends.
 :::
 
 ### `asset_pattern`
@@ -170,12 +170,12 @@ Use `rename_exe` for archives where the binary inside has a different name than 
 
 ### `bin_path`
 
-Specify the directory containing binaries within the extracted archive, or where to place the downloaded file. This supports templating with `{name}`, `{version}`, `{os}`, `{arch}`, and `{ext}`:
+Specify the directory containing binaries within the extracted archive, or where to place the downloaded file. This supports Tera templating with variables like `{{ version }}`, `{{ os }}`, `{{ arch }}`, and arch aliases (`{{ darwin_os }}`, `{{ amd64_arch }}`, `{{ x86_64_arch }}`, `{{ gnu_arch }}`):
 
 ```toml
 [tools."github:cli/cli"]
 version = "latest"
-bin_path = "{name}-{version}/bin" # expands to cli-1.0.0/bin
+bin_path = "cli-{{ version }}/bin" # expands to cli-1.0.0/bin
 ```
 
 **Binary path lookup order:**

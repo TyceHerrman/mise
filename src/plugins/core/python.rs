@@ -1,5 +1,5 @@
 use crate::backend::platform_target::PlatformTarget;
-use crate::backend::{Backend, VersionCacheManager};
+use crate::backend::{Backend, VersionCacheManager, VersionInfo};
 use crate::build_time::built_info;
 use crate::cache::{CacheManager, CacheManagerBuilder};
 use crate::cli::args::BackendArg;
@@ -37,6 +37,51 @@ pub fn python_path(tv: &ToolVersion) -> PathBuf {
     } else {
         tv.install_path().join("bin/python")
     }
+}
+
+/// Sort key for Python versions that handles miniconda's two versioning schemes correctly.
+///
+/// Miniconda has two formats:
+/// - Old format: `miniconda3-{conda_version}` (e.g., `miniconda3-3.16.0`, `miniconda3-4.7.12`)
+/// - New format: `miniconda3-{python_version}-{conda_version}` (e.g., `miniconda3-3.7-4.8.2`)
+///
+/// Returns a tuple for sorting: (distro_priority, prefix_order, is_not_latest, conda_version, python_version)
+/// distro_priority: 0 = other distros, 1 = miniconda, 2 = CPython (bare version numbers)
+fn python_version_sort_key(
+    version: &str,
+) -> (u8, u8, bool, Option<Versioning>, Option<Versioning>) {
+    // Check if this is a miniconda version and get prefix order
+    let (prefix_order, version_part) = if let Some(v) = version.strip_prefix("miniconda3-") {
+        (2u8, v)
+    } else if let Some(v) = version.strip_prefix("miniconda2-") {
+        (1u8, v)
+    } else if let Some(v) = version.strip_prefix("miniconda-") {
+        (0u8, v)
+    } else {
+        // Not miniconda - put other distros first (0), CPython (digit-starting) last (2)
+        let starts_with_digit = regex!(r"^\d").is_match(version);
+        return (if starts_with_digit { 2 } else { 0 }, 0, false, None, None);
+    };
+
+    // Handle "latest" specially - put first in each miniconda group
+    if version_part == "latest" {
+        return (1, prefix_order, false, None, None);
+    }
+
+    // Parse miniconda version: old format vs new format
+    // Old format has no dash in version part: "3.16.0"
+    // New format has dash separating python and conda: "3.7-4.8.2"
+    let (conda_version, python_version) = if let Some(dash_pos) = version_part.find('-') {
+        // New format: "3.7-4.8.2" -> python=3.7, conda=4.8.2
+        let python = &version_part[..dash_pos];
+        let conda = &version_part[dash_pos + 1..];
+        (Versioning::new(conda), Versioning::new(python))
+    } else {
+        // Old format: "3.16.0" -> conda=3.16.0, no python version
+        (Versioning::new(version_part), None)
+    };
+
+    (1, prefix_order, true, conda_version, python_version)
 }
 
 impl PythonPlugin {
@@ -124,7 +169,7 @@ impl PythonPlugin {
                 let settings = Settings::get();
                 let url_path = python_precompiled_url_path(&settings);
                 let rsp = HTTP_FETCH
-                    .get_bytes(format!("https://mise-versions.jdx.dev/{url_path}"))
+                    .get_bytes(format!("https://mise-versions.jdx.dev/tools/{url_path}"))
                     .await?;
                 let mut decoder = GzDecoder::new(rsp.as_ref());
                 let mut raw = String::new();
@@ -423,13 +468,16 @@ impl Backend for PythonPlugin {
         &self.ba
     }
 
-    async fn _list_remote_versions(&self, _config: &Arc<Config>) -> eyre::Result<Vec<String>> {
+    async fn _list_remote_versions(&self, _config: &Arc<Config>) -> eyre::Result<Vec<VersionInfo>> {
         if cfg!(windows) || Settings::get().python.compile == Some(false) {
             Ok(self
                 .fetch_precompiled_remote_versions()
                 .await?
                 .iter()
-                .map(|(v, _, _)| v.clone())
+                .map(|(v, _, _)| VersionInfo {
+                    version: v.clone(),
+                    ..Default::default()
+                })
                 .collect())
         } else {
             self.install_or_update_python_build(None)?;
@@ -440,8 +488,11 @@ impl Backend for PythonPlugin {
                     .split('\n')
                     // remove free-threaded pythons like 3.13t and 3.14t-dev
                     .filter(|s| !regex!(r"\dt(-dev)?$").is_match(s))
-                    .map(|s| s.to_string())
-                    .sorted_by_cached_key(|v| regex!(r"^\d+").is_match(v))
+                    .map(|s| VersionInfo {
+                        version: s.to_string(),
+                        ..Default::default()
+                    })
+                    .sorted_by_cached_key(|v| python_version_sort_key(&v.version))
                     .collect();
                 Ok(versions)
             })

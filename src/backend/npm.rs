@@ -35,13 +35,16 @@ impl Backend for NPMBackend {
     }
 
     fn get_dependencies(&self) -> eyre::Result<Vec<&str>> {
-        Ok(vec!["node", "bun", "pnpm"])
+        // Don't include "npm" as dependency when we ARE npm itself (npm:npm)
+        // to avoid circular dependency that causes timeout
+        if self.tool_name() == "npm" {
+            Ok(vec!["node", "bun", "pnpm"])
+        } else {
+            Ok(vec!["node", "npm", "bun", "pnpm"])
+        }
     }
 
-    async fn _list_remote_versions_with_info(
-        &self,
-        config: &Arc<Config>,
-    ) -> eyre::Result<Vec<VersionInfo>> {
+    async fn _list_remote_versions(&self, config: &Arc<Config>) -> eyre::Result<Vec<VersionInfo>> {
         // Use npm CLI to respect custom registry configurations
         self.ensure_npm_for_version_check(config).await;
         timeout::run_with_timeout_async(
@@ -52,9 +55,11 @@ impl Backend for NPMBackend {
                 let versions_raw =
                     cmd!(NPM_PROGRAM, "view", self.tool_name(), "versions", "--json")
                         .full_env(&env)
+                        .env("NPM_CONFIG_UPDATE_NOTIFIER", "false")
                         .read()?;
                 let time_raw = cmd!(NPM_PROGRAM, "view", self.tool_name(), "time", "--json")
                     .full_env(&env)
+                    .env("NPM_CONFIG_UPDATE_NOTIFIER", "false")
                     .read()?;
 
                 let versions: Vec<String> = serde_json::from_str(&versions_raw)?;
@@ -94,6 +99,7 @@ impl Backend for NPMBackend {
                         let raw =
                             cmd!(NPM_PROGRAM, "view", this.tool_name(), "dist-tags", "--json")
                                 .full_env(this.dependency_env(config).await?)
+                                .env("NPM_CONFIG_UPDATE_NOTIFIER", "false")
                                 .read()?;
                         let dist_tags: Value = serde_json::from_str(&raw)?;
                         match dist_tags["latest"] {
@@ -118,6 +124,10 @@ impl Backend for NPMBackend {
                     .arg(format!("{}@{}", self.tool_name(), tv.version))
                     .arg("--global")
                     .arg("--trust")
+                    // Isolated linker does not symlink binaries into BUN_INSTALL_BIN properly.
+                    // https://github.com/jdx/mise/discussions/7541
+                    .arg("--linker")
+                    .arg("hoisted")
                     .with_pr(ctx.pr.as_ref())
                     .envs(ctx.ts.env_with_path(&ctx.config).await?)
                     .env("BUN_INSTALL_GLOBAL_DIR", tv.install_path())
@@ -256,5 +266,40 @@ impl NPMBackend {
                 .await
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cli::args::BackendArg;
+
+    fn create_npm_backend(tool: &str) -> NPMBackend {
+        let ba = BackendArg::new_raw(
+            "npm".to_string(),
+            Some(tool.to_string()),
+            tool.to_string(),
+            None,
+        );
+        NPMBackend::from_arg(ba)
+    }
+
+    #[test]
+    fn test_get_dependencies_for_npm_itself() {
+        // When the tool is npm itself (npm:npm), it should NOT include "npm" in dependencies
+        // to avoid circular dependency that causes timeout
+        let backend = create_npm_backend("npm");
+        let deps = backend.get_dependencies().unwrap();
+        assert!(!deps.contains(&"npm"), "npm:npm should not depend on npm");
+        assert!(deps.contains(&"node"));
+    }
+
+    #[test]
+    fn test_get_dependencies_for_other_packages() {
+        // When the tool is any other npm package, it SHOULD include "npm" in dependencies
+        let backend = create_npm_backend("prettier");
+        let deps = backend.get_dependencies().unwrap();
+        assert!(deps.contains(&"npm"), "npm:prettier should depend on npm");
+        assert!(deps.contains(&"node"));
     }
 }

@@ -1,4 +1,5 @@
 use crate::backend::Backend;
+use crate::backend::VersionInfo;
 use crate::backend::backend_type::BackendType;
 use crate::backend::static_helpers::{
     clean_binary_name, get_filename_from_url, list_available_platforms_with_key,
@@ -532,7 +533,6 @@ impl HttpBackend {
                 ));
             }
         } else if lockfile_enabled {
-            ctx.pr.set_message(format!("record size {filename}"));
             platform_info.size = Some(file_path.metadata()?.len());
         }
 
@@ -544,8 +544,12 @@ impl HttpBackend {
     // -------------------------------------------------------------------------
 
     /// Fetch versions from version_list_url if configured
-    async fn fetch_versions(&self) -> Result<Vec<String>> {
-        let opts = self.ba.opts();
+    async fn fetch_versions(&self, config: &Arc<Config>) -> Result<Vec<String>> {
+        let opts = if !self.ba.opts().contains_key("version_list_url") {
+            config.get_tool_opts(&self.ba).await?.unwrap_or_default()
+        } else {
+            self.ba.opts()
+        };
 
         let url = match opts.get("version_list_url") {
             Some(url) => url.clone(),
@@ -554,8 +558,9 @@ impl HttpBackend {
 
         let regex = opts.get("version_regex").map(|s| s.as_str());
         let json_path = opts.get("version_json_path").map(|s| s.as_str());
+        let version_expr = opts.get("version_expr").map(|s| s.as_str());
 
-        version_list::fetch_versions(&url, regex, json_path).await
+        version_list::fetch_versions(&url, regex, json_path, version_expr).await
     }
 }
 
@@ -567,6 +572,7 @@ pub fn install_time_option_keys() -> Vec<String> {
         "version_list_url".into(),
         "version_regex".into(),
         "version_json_path".into(),
+        "version_expr".into(),
         "format".into(),
     ]
 }
@@ -581,8 +587,15 @@ impl Backend for HttpBackend {
         &self.ba
     }
 
-    async fn _list_remote_versions(&self, _config: &Arc<Config>) -> Result<Vec<String>> {
-        self.fetch_versions().await
+    async fn _list_remote_versions(&self, config: &Arc<Config>) -> Result<Vec<VersionInfo>> {
+        let versions = self.fetch_versions(config).await?;
+        Ok(versions
+            .into_iter()
+            .map(|v| VersionInfo {
+                version: v,
+                ..Default::default()
+            })
+            .collect())
     }
 
     async fn install_version_(

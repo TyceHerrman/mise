@@ -61,9 +61,13 @@ impl ErlangPlugin {
             return Ok(());
         }
         self.install_kerl().await?;
-        cmd!(self.kerl_path(), "update", "releases")
+        let output = cmd!(self.kerl_path(), "update", "releases")
             .env("KERL_BASE_DIR", self.kerl_base_dir())
+            .stdout_capture()
+            .stderr_capture()
             .run()?;
+        trace!("kerl stdout: {}", String::from_utf8_lossy(&output.stdout));
+        trace!("kerl stderr: {}", String::from_utf8_lossy(&output.stderr));
         Ok(())
     }
 
@@ -306,10 +310,7 @@ impl Backend for ErlangPlugin {
         &self.ba
     }
 
-    async fn _list_remote_versions_with_info(
-        &self,
-        _config: &Arc<Config>,
-    ) -> Result<Vec<VersionInfo>> {
+    async fn _list_remote_versions(&self, _config: &Arc<Config>) -> Result<Vec<VersionInfo>> {
         let versions = if Settings::get().erlang.compile == Some(false) {
             github::list_releases("erlef/otp_builds")
                 .await?

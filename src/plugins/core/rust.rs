@@ -74,20 +74,18 @@ impl Backend for RustPlugin {
         &self.ba
     }
 
-    async fn _list_remote_versions_with_info(
-        &self,
-        _config: &Arc<Config>,
-    ) -> Result<Vec<VersionInfo>> {
+    async fn _list_remote_versions(&self, _config: &Arc<Config>) -> Result<Vec<VersionInfo>> {
         let versions: Vec<VersionInfo> = github::list_releases("rust-lang/rust")
             .await?
             .into_iter()
             .map(|r| VersionInfo {
+                release_url: Some(format!("https://releases.rs/docs/{}/", r.tag_name)),
                 version: r.tag_name,
                 created_at: Some(r.created_at),
-                ..Default::default()
             })
             .rev()
             .chain(vec![
+                // Special channels don't have release URLs since they're not actual releases
                 VersionInfo {
                     version: "nightly".into(),
                     ..Default::default()

@@ -99,16 +99,24 @@ impl Vfox {
     }
 
     pub fn get_sdk(&self, name: &str) -> Result<Plugin> {
-        Plugin::from_dir(&self.plugin_dir.join(name))
+        Plugin::from_name_or_dir(name, &self.plugin_dir.join(name))
     }
 
     pub fn install_plugin(&self, sdk: &str) -> Result<Plugin> {
+        // Check filesystem first - allows user to override embedded plugins
         let plugin_dir = self.plugin_dir.join(sdk);
-        if !plugin_dir.exists() {
-            let url = registry::sdk_url(sdk).ok_or_else(|| format!("Unknown SDK: {sdk}"))?;
-            return self.install_plugin_from_url(url);
+        if plugin_dir.exists() {
+            return Plugin::from_dir(&plugin_dir);
         }
-        Plugin::from_dir(&plugin_dir)
+
+        // Fall back to embedded plugin if available
+        if let Some(embedded) = crate::embedded_plugins::get_embedded_plugin(sdk) {
+            return Plugin::from_embedded(sdk, embedded);
+        }
+
+        // Otherwise install from registry
+        let url = registry::sdk_url(sdk).ok_or_else(|| format!("Unknown SDK: {sdk}"))?;
+        self.install_plugin_from_url(url)
     }
 
     pub fn install_plugin_from_url(&self, url: &Url) -> Result<Plugin> {
@@ -189,7 +197,12 @@ impl Vfox {
         self.get_sdk(sdk)?.get_metadata()
     }
 
-    pub async fn env_keys(&self, sdk: &str, version: &str) -> Result<Vec<EnvKey>> {
+    pub async fn env_keys<T: serde::Serialize>(
+        &self,
+        sdk: &str,
+        version: &str,
+        options: T,
+    ) -> Result<Vec<EnvKey>> {
         debug!("Getting env keys for {sdk} version {version}");
         let sdk = self.get_sdk(sdk)?;
         let sdk_info = sdk.sdk_info(
@@ -202,6 +215,7 @@ impl Vfox {
             path: sdk_info.path.clone(),
             sdk_info: BTreeMap::from([(sdk_info.name.clone(), sdk_info.clone())]),
             main: sdk_info,
+            options,
         };
         sdk.env_keys(ctx).await
     }
@@ -437,7 +451,14 @@ mod tests {
     async fn test_env_keys() {
         let vfox = Vfox::test();
         // dummy plugin already exists in plugins/dummy, no need to install
-        let keys = vfox.env_keys("dummy", "1.0.0").await.unwrap();
+        let keys = vfox
+            .env_keys(
+                "dummy",
+                "1.0.0",
+                serde_json::Value::Object(Default::default()),
+            )
+            .await
+            .unwrap();
         let output = format!("{keys:?}").replace(
             &vfox.install_dir.to_string_lossy().to_string(),
             "<INSTALL_DIR>",
