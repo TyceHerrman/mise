@@ -238,6 +238,11 @@ backends = ["aqua:ariga/atlas", "asdf:komi1230/asdf-atlas"]
 description = "A modern tool for managing database schemas"
 test = ["atlas version", "atlas version v{{version}}"]
 
+[tools.atlas-community]
+backends = ["aqua:ariga/atlas/community"]
+description = "A modern tool for managing database schemas (Community Edition)"
+test = ["atlas version", "atlas community version v{{version}}"]
+
 [tools.atmos]
 backends = ["aqua:cloudposse/atmos", "asdf:cloudposse/asdf-atmos"]
 description = "Workflow automation tool for DevOps. Keep configuration DRY with hierarchical imports of configurations, inheritance, and WAY more. Native support for Terraform and Helmfile"
@@ -3016,6 +3021,11 @@ backends = [
 ]
 description = "A modern, JVM-based, full-stack framework for building modular, easily testable microservice and serverless applications"
 
+[tools.miller]
+backends = ["aqua:johnkerl/miller"]
+description = "Miller is like awk, sed, cut, join, and sort for name-indexed data such as CSV, TSV, and tabular JSON"
+test = ["mlr version", "mlr version {{version}}"]
+
 [tools.mimirtool]
 backends = [
   "aqua:grafana/mimir/mimirtool",
@@ -3130,7 +3140,7 @@ description = "Neon CLI tool. The Neon CLI is a command-line interface that lets
 test = ["neonctl --version", "{{version}}"]
 
 [tools.neovim]
-backends = ["aqua:neovim/neovim", "asdf:richin13/asdf-neovim"]
+backends = ["vfox:mise-plugins/vfox-neovim", "aqua:neovim/neovim"]
 description = "Vim-fork focused on extensibility and usability"
 
 [tools.nerdctl]
@@ -3827,7 +3837,7 @@ test = ["sccache --version", "sccache {{version}}"]
 [tools.schemacrawler]
 backends = ["github:schemacrawler/SchemaCrawler[exe=schemacrawler.sh]"]
 description = "Free database schema discovery and comprehension tool"
-test = ["schemacrawler.sh --version", "SchemaCrawler {{version}}"]
+#test = ["schemacrawler.sh --version", "SchemaCrawler {{version}}"]
 
 [tools.scie-pants]
 backends = ["github:pantsbuild/scie-pants", "asdf:robzr/asdf-scie-pants"]
@@ -4957,6 +4967,10 @@ test = ["zoxide --version", "zoxide {{version}}"]
 
 [tools.zprint]
 description = "Executables, uberjar, and library to beautifully format Clojure and Clojurescript source code and s-expressions"
+test = ["zprint --version 2>&1", "zprint-{{version}}"]
+
+[[tools.zprint.backends]]
+full = "aqua:kkinnear/zprint"
 
 [[tools.zprint.backends]]
 full = "github:kkinnear/zprint[bin=zprint]"

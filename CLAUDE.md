@@ -6,6 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ### Building and Testing
 - `mise run build` or `mise run b` - Build the project with cargo
+- `target/debug/mise` - Run the built binary directly
 - `mise run test` or `mise run t` - Run all tests (unit + e2e)
 - `mise run test:unit` - Run unit tests only
 - `mise run test:e2e` - Run end-to-end tests only
@@ -22,6 +23,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - `mise run test:e2e [test_filename]...` - Run specific e2e tests (use this instead of executing test files directly)
 - `mise --cd crates/vfox run test` - Run tests for the vfox crate
 - `mise --cd crates/vfox run lint` - Run linting for the vfox crate
+- `mise --cd crates/vfox run lint-fix` - Run linting and fix issues for the vfox crate
+- `mise task ls` - List all available tasks
 
 ### Documentation and Generation
 - `mise run render` - Generate all documentation and completions
@@ -79,7 +82,8 @@ Mise is a Rust CLI tool that manages development environments, tools, tasks, and
 
 ### Test Structure
 - Unit tests within source files
-- E2E tests in `e2e/` directory organized by feature area
+- E2E tests in `e2e/` directory organized by feature area (e.g., `e2e/cli/`, `e2e/backend/`)
+- E2E tests are bash scripts using assertion helpers from `e2e/assert.sh` (e.g., `assert`, `assert_contains`, `assert_fail`)
 - Snapshot tests using `insta` crate for CLI output verification
 - Windows-specific tests in `e2e-win/`
 
@@ -106,7 +110,7 @@ All commit messages and PR titles MUST follow conventional commit format:
 - `test:` - Testing changes
 - `chore:` - Maintenance tasks
 - `chore(deps):` - Dependency updates
-- `registry:` - New tool additions to the registry (no scope needed)
+- `registry:` - New tool additions to `registry.toml` (no scope needed)
 
 **Common Scopes:** `aqua`, `cli`, `config`, `backend`, `tool`, `env`, `task`, `api`, `ui`, `core`, `deps`, `schema`, `doctor`, `shim`, `security`
 
@@ -145,3 +149,16 @@ The configuration system supports multiple file formats and environment-specific
 - Platform-specific tool installation logic in core plugins
 - Shim system varies by platform (especially Windows)
 - we don't chmod mise e2e tests to be executable
+
+## Documentation
+
+### URL Structure
+When referencing mise documentation URLs, use the correct path structure based on the `docs/` directory layout:
+
+- **Dev tools & backends**: `mise.jdx.dev/dev-tools/backends/<backend>.html` (e.g., `mise.jdx.dev/dev-tools/backends/s3.html`)
+- **Configuration**: `mise.jdx.dev/configuration/...`
+- **Tasks**: `mise.jdx.dev/tasks/...`
+- **Environments**: `mise.jdx.dev/environments/...`
+- **CLI reference**: `mise.jdx.dev/cli/...`
+
+Do NOT use shortened paths like `mise.jdx.dev/backends/...` - always include the full path matching the `docs/` directory structure.

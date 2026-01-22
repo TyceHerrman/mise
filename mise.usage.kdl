@@ -155,10 +155,10 @@ cmd cache help="Manage the mise cache" {
 }
 cmd completion help="Generate shell completions" {
     alias complete completions hide=#true
-    after_long_help "Examples:\n\n    $ mise completion bash --include-bash-completion-lib > ~/.local/share/bash-completion/completions/mise\n    $ mise completion zsh  > /usr/local/share/zsh/site-functions/_mise\n    $ mise completion fish > ~/.config/fish/completions/mise.fish\n"
+    after_long_help "Examples:\n\n    $ mise completion bash --include-bash-completion-lib > ~/.local/share/bash-completion/completions/mise\n    $ mise completion zsh  > /usr/local/share/zsh/site-functions/_mise\n    $ mise completion fish > ~/.config/fish/completions/mise.fish\n    $ mise completion powershell >> $PROFILE\n"
     flag "-s --shell" help="Shell type to generate completions for" hide=#true {
         arg <SHELL_TYPE> {
-            choices bash fish zsh
+            choices bash fish powershell zsh
         }
     }
     flag --include-bash-completion-lib help="Include the bash completion library in the bash completion script" {
@@ -168,7 +168,7 @@ cmd completion help="Generate shell completions" {
         long_help "Always use usage for completions.\nCurrently, usage is the default for fish and bash but not zsh since it has a few quirks\nto work out first.\n\nThis requires the `usage` CLI to be installed.\nhttps://usage.jdx.dev"
     }
     arg "[SHELL]" help="Shell type to generate completions for" required=#false {
-        choices bash fish zsh
+        choices bash fish powershell zsh
     }
 }
 cmd config help="Manage config files" {
@@ -281,6 +281,7 @@ cmd exec help="Execute a command with tool(s) set" {
     flag "-j --jobs" help="Number of jobs to run in parallel\n[default: 4]" {
         arg <JOBS>
     }
+    flag --fresh-env help="Bypass the environment cache and recompute the environment"
     flag --no-prepare help="Skip automatic dependency preparation"
     flag --raw help="Directly pipe stdin/stdout/stderr from plugin to user Sets --jobs=1"
     arg "[TOOL@VERSION]…" help="Tool(s) to start e.g.: node@20 python@3.10" required=#false var=#true
@@ -712,6 +713,7 @@ cmd run restart_token=::: help="Run task(s)" {
     flag "-t --tool" help="Tool(s) to run in addition to what is in mise.toml files e.g.: node@20 python@3.10" var=#true {
         arg <TOOL@VERSION>
     }
+    flag --fresh-env help="Bypass the environment cache and recompute the environment"
     flag --no-cache help="Do not use cache on remote tasks"
     flag --no-prepare help="Skip automatic dependency preparation"
     flag --no-timings help="Hides elapsed time after each task completes" {
@@ -1020,6 +1022,7 @@ cmd tasks help="Manage tasks" {
         flag "-t --tool" help="Tool(s) to run in addition to what is in mise.toml files e.g.: node@20 python@3.10" var=#true {
             arg <TOOL@VERSION>
         }
+        flag --fresh-env help="Bypass the environment cache and recompute the environment"
         flag --no-cache help="Do not use cache on remote tasks"
         flag --no-prepare help="Skip automatic dependency preparation"
         flag --no-timings help="Hides elapsed time after each task completes" {
@@ -1178,7 +1181,7 @@ cmd version help="Display the version of mise" {
 }
 cmd watch help="Run task(s) and watch for changes to rerun it" {
     alias w
-    long_help "Run task(s) and watch for changes to rerun it\n\nThis command uses the `watchexec` tool to watch for changes to files and rerun the specified task(s).\nIt must be installed for this command to work, but you can install it with `mise use -g watchexec@latest`."
+    long_help "Run task(s) and watch for changes to rerun it\n\nThis command uses the `watchexec` tool to watch for changes to files and rerun the specified task(s).\nIt must be installed for this command to work, but you can install it with `mise use -g watchexec@latest`.\n\nFor more advanced process management (daemon management, auto-restart, readiness checks,\ncron scheduling), see mise's sister project: https://pitchfork.jdx.dev"
     after_long_help "Examples:\n\n    $ mise watch build\n    Runs the \"build\" tasks. Will re-run the tasks when any of its sources change.\n    Uses \"sources\" from the tasks definition to determine which files to watch.\n\n    $ mise watch build --glob src/**/*.rs\n    Runs the \"build\" tasks but specify the files to watch with a glob pattern.\n    This overrides the \"sources\" from the tasks definition.\n\n    $ mise watch build --clear\n    Extra arguments are passed to watchexec. See `watchexec --help` for details.\n\n    $ mise watch serve --watch src --exts rs --restart\n    Starts an api server, watching for changes to \"*.rs\" files in \"./src\" and kills/restarts the server when they change.\n"
     flag "-t --task-flag" help="Tasks to run" var=#true hide=#true {
         arg <TASK_FLAG>

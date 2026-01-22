@@ -65,6 +65,79 @@ impl<'a> TomlParser<'a> {
     }
 }
 
+pub struct TrackingTomlParser<'a> {
+    inner: TomlParser<'a>,
+    table: &'a toml::Value,
+    parsed_keys: std::collections::BTreeSet<String>,
+}
+
+impl<'a> TrackingTomlParser<'a> {
+    pub fn new(table: &'a toml::Value) -> Self {
+        Self {
+            inner: TomlParser::new(table),
+            table,
+            parsed_keys: std::collections::BTreeSet::new(),
+        }
+    }
+
+    fn record(&mut self, key: &str) {
+        self.parsed_keys.insert(key.to_string());
+    }
+
+    #[cfg(test)]
+    pub fn parsed_keys(&self) -> impl Iterator<Item = &str> {
+        self.parsed_keys.iter().map(|s| s.as_str())
+    }
+
+    pub fn unparsed_keys(&self) -> Vec<String> {
+        if let Some(table) = self.table.as_table() {
+            table
+                .keys()
+                .filter(|k| !self.parsed_keys.contains(k.as_str()))
+                .cloned()
+                .collect()
+        } else {
+            vec![]
+        }
+    }
+
+    pub fn parse_str<T>(&mut self, key: &str) -> Option<T>
+    where
+        T: From<String>,
+    {
+        self.record(key);
+        self.inner.parse_str::<T>(key)
+    }
+
+    pub fn parse_bool(&mut self, key: &str) -> Option<bool> {
+        self.record(key);
+        self.inner.parse_bool(key)
+    }
+
+    pub fn parse_array<T>(&mut self, key: &str) -> Option<Vec<T>>
+    where
+        T: From<String>,
+    {
+        self.record(key);
+        self.inner.parse_array::<T>(key)
+    }
+
+    pub fn parse_table(&mut self, key: &str) -> Option<BTreeMap<String, toml::Value>> {
+        self.record(key);
+        self.inner.parse_table(key)
+    }
+
+    pub fn parse_env(&mut self, key: &str) -> Result<Option<EnvList>> {
+        self.record(key);
+        self.inner.parse_env(key)
+    }
+
+    pub fn get_raw(&mut self, key: &str) -> Option<&'a toml::Value> {
+        self.record(key);
+        self.table.get(key)
+    }
+}
+
 pub fn deserialize_arr<'de, D, C, T>(deserializer: D) -> std::result::Result<C, D::Error>
 where
     D: de::Deserializer<'de>,

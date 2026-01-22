@@ -74,6 +74,12 @@ impl Backend for RustPlugin {
         &self.ba
     }
 
+    /// Rust uses rustup for installation, which handles its own downloads.
+    /// Lockfile URLs are not applicable since we don't download artifacts directly.
+    fn supports_lockfile_url(&self) -> bool {
+        false
+    }
+
     async fn _list_remote_versions(&self, _config: &Arc<Config>) -> Result<Vec<VersionInfo>> {
         let versions: Vec<VersionInfo> = github::list_releases("rust-lang/rust")
             .await?
@@ -82,20 +88,24 @@ impl Backend for RustPlugin {
                 release_url: Some(format!("https://releases.rs/docs/{}/", r.tag_name)),
                 version: r.tag_name,
                 created_at: Some(r.created_at),
+                ..Default::default()
             })
             .rev()
             .chain(vec![
-                // Special channels don't have release URLs since they're not actual releases
+                // Special channels - these are rolling releases that should always be updated
                 VersionInfo {
                     version: "nightly".into(),
+                    rolling: true,
                     ..Default::default()
                 },
                 VersionInfo {
                     version: "beta".into(),
+                    rolling: true,
                     ..Default::default()
                 },
                 VersionInfo {
                     version: "stable".into(),
+                    rolling: true,
                     ..Default::default()
                 },
             ])
