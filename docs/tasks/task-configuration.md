@@ -159,6 +159,11 @@ run = "eslint ."
 
 Supports the same argument and environment variable syntax as `depends`.
 
+`wait_for` matches tasks differently depending on whether args or env vars are specified:
+
+- `wait_for = ["setup"]` — matches by name, regardless of args or env overrides. If another task runs `depends = ["DEBUG=1 setup"]`, this will still match and wait for it.
+- `wait_for = ["setup arg1"]` or `wait_for = ["DEBUG=1 setup"]` — matches only tasks running with that exact args/env configuration.
+
 ### `env`
 
 - **Type**: `{ [key]: string | int | bool }`
@@ -227,6 +232,18 @@ time to run. The user will be prompted to confirm before the task is run.
 confirm = "Are you sure you want to cut a release?"
 description = 'Cut a new release'
 file = 'scripts/release.sh'
+```
+
+The confirm message supports Tera templates and can reference usage arguments:
+
+```mise-toml
+[tasks.deploy]
+usage = '''
+arg "<environment>" help="Environment to deploy to"
+flag "--force" help="Force deployment"
+'''
+confirm = "Deploy to {{ usage.environment }}?{% if usage.force %} (forced){% endif %}"
+run = "deploy.sh ${usage_environment}"
 ```
 
 ### `raw`

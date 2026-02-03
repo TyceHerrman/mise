@@ -6,7 +6,6 @@ pub use settings::Settings;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt::{Debug, Formatter};
 use std::iter::once;
-use std::ops::Deref;
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock as Lazy;
 use std::sync::{Arc, Mutex, RwLock};
@@ -26,8 +25,8 @@ use crate::config::tracking::Tracker;
 use crate::env::{MISE_DEFAULT_CONFIG_FILENAME, MISE_DEFAULT_TOOL_VERSIONS_FILENAME};
 use crate::file::display_path;
 use crate::shorthands::{Shorthands, get_shorthands};
-use crate::task::Task;
 use crate::task::task_file_providers::TaskFileProvidersBuilder;
+use crate::task::{Task, TaskTemplate};
 use crate::toolset::{
     ToolRequestSet, ToolRequestSetBuilder, ToolVersion, ToolVersionOptions, Toolset, install_state,
 };
@@ -44,6 +43,7 @@ use crate::env_diff::EnvMap;
 use crate::hook_env::WatchFilePattern;
 use crate::hooks::Hook;
 use crate::plugins::PluginType;
+use crate::redactions::Redactor;
 use crate::tera::BASE_CONTEXT;
 use crate::watch_files::WatchFile;
 use crate::wildcard::Wildcard;
@@ -79,7 +79,7 @@ pub struct Alias {
 }
 
 static _CONFIG: RwLock<Option<Arc<Config>>> = RwLock::new(None);
-static _REDACTIONS: Lazy<Mutex<Arc<IndexSet<String>>>> = Lazy::new(Default::default);
+static _REDACTOR: Lazy<Mutex<Redactor>> = Lazy::new(Default::default);
 
 pub fn is_loaded() -> bool {
     _CONFIG.read().unwrap().is_some()
@@ -470,8 +470,16 @@ impl Config {
     ) -> Result<BTreeMap<String, Task>> {
         let config = Config::get().await?;
         time!("load_all_tasks");
-        let local_tasks = load_local_tasks_with_context(&config, ctx).await?;
-        let global_tasks = load_global_tasks(&config).await?;
+
+        // Collect all task templates from config hierarchy (experimental feature)
+        let templates = if Settings::get().experimental {
+            collect_task_templates(&config.config_files)
+        } else {
+            IndexMap::new()
+        };
+
+        let local_tasks = load_local_tasks_with_context(&config, ctx, &templates).await?;
+        let global_tasks = load_global_tasks(&config, &templates).await?;
         let mut tasks: BTreeMap<String, Task> = local_tasks
             .into_iter()
             .chain(global_tasks)
@@ -680,60 +688,25 @@ impl Config {
             .collect()
     }
     pub fn add_redactions(&self, redactions: impl IntoIterator<Item = String>, env: &EnvMap) {
-        let mut r = _REDACTIONS.lock().unwrap();
-        let redactions = redactions.into_iter().flat_map(|r| {
-            let matcher = Wildcard::new(vec![r]);
+        let mut r = _REDACTOR.lock().unwrap();
+        let new_redactions = redactions.into_iter().flat_map(|pattern| {
+            let matcher = Wildcard::new(vec![pattern]);
             env.iter()
                 .filter(|(k, _)| matcher.match_any(k))
                 .map(|(_, v)| v.clone())
                 .collect::<Vec<_>>()
         });
-        *r = Arc::new(r.iter().cloned().chain(redactions).collect());
+        *r = r.with_additional(new_redactions);
     }
 
+    /// Get the current redaction patterns.
     pub fn redactions(&self) -> Arc<IndexSet<String>> {
-        let r = _REDACTIONS.lock().unwrap();
-        r.deref().clone()
-
-        // self.redactions.get_or_try_init(|| {
-        //     let mut redactions = Redactions::default();
-        //     for cf in self.config_files.values() {
-        //         let r = cf.redactions();
-        //         if !r.is_empty() {
-        //             let mut r = r.clone();
-        //             let (tera, ctx) = self.tera(&cf.config_root());
-        //             r.render(&mut tera.clone(), &ctx)?;
-        //             redactions.merge(r);
-        //         }
-        //     }
-        //     if redactions.is_empty() {
-        //         return Ok(Default::default());
-        //     }
-        //
-        //     let ts = self.get_toolset()?;
-        //     let env = ts.full_env()?;
-        //
-        //     let env_matcher = Wildcard::new(redactions.env.clone());
-        //     let var_matcher = Wildcard::new(redactions.vars.clone());
-        //
-        //     let env_vals = env
-        //         .into_iter()
-        //         .filter(|(k, _)| env_matcher.match_any(k))
-        //         .map(|(_, v)| v);
-        //     let var_vals = self
-        //         .vars
-        //         .iter()
-        //         .filter(|(k, _)| var_matcher.match_any(k))
-        //         .map(|(_, v)| v.to_string());
-        //     Ok(env_vals.chain(var_vals).collect())
-        // })
+        _REDACTOR.lock().unwrap().patterns_arc()
     }
 
-    pub fn redact(&self, mut input: String) -> String {
-        for redaction in self.redactions().deref() {
-            input = input.replace(redaction, "[redacted]");
-        }
-        input
+    /// Redact sensitive values from a string using Aho-Corasick for efficiency.
+    pub fn redact(&self, input: &str) -> String {
+        _REDACTOR.lock().unwrap().redact(input)
     }
 }
 
@@ -1083,29 +1056,6 @@ pub fn load_config_hierarchy_from_dir(start_dir: &Path) -> Result<Vec<PathBuf>> 
     Ok(paths)
 }
 
-/// Load config hierarchy from a subdirectory up to (and including) the monorepo root.
-/// This is used for task inheritance in monorepo mode - tasks defined at parent levels
-/// should be accessible from subdirectories.
-/// Reuses load_config_hierarchy_from_dir but filters to only include configs within the monorepo.
-/// Note: Returns configs in child→parent order (same as load_config_hierarchy_from_dir).
-/// Callers should iterate with .rev() if they want child to override parent.
-fn load_config_hierarchy_to_monorepo_root(
-    start_dir: &Path,
-    monorepo_root: &Path,
-) -> Result<Vec<PathBuf>> {
-    // Use the existing function to load the full hierarchy
-    let all_paths = load_config_hierarchy_from_dir(start_dir)?;
-
-    // Filter to only include configs within the monorepo root (excludes global/system configs
-    // and any configs above the monorepo root)
-    let paths: Vec<PathBuf> = all_paths
-        .into_iter()
-        .filter(|p| p.starts_with(monorepo_root))
-        .collect();
-
-    Ok(paths)
-}
-
 pub fn is_global_config(path: &Path) -> bool {
     global_config_files().contains(path) || system_config_files().contains(path)
 }
@@ -1361,45 +1311,6 @@ pub async fn load_config_files_from_paths(config_paths: &[PathBuf]) -> Result<Co
     Ok(config_map)
 }
 
-/// Load config files from a list of paths, warning on errors instead of failing.
-/// Reuses already-parsed configs from `existing_configs` when available (caching).
-/// Used for monorepo subdirectory loading where we want to be tolerant of broken configs.
-async fn load_config_files_tolerant(
-    config_paths: &[PathBuf],
-    existing_configs: &ConfigMap,
-    monorepo_root: &Path,
-) -> Result<ConfigMap> {
-    backend::load_tools().await?;
-    let idiomatic_filenames = BTreeMap::new();
-    let mut config_map = ConfigMap::default();
-
-    for f in config_paths.iter().unique() {
-        if f.is_dir() {
-            continue;
-        }
-        // Reuse configs already parsed during Config::load() (e.g., root config)
-        if let Some(cf) = existing_configs.get(f) {
-            config_map.insert(f.clone(), cf.clone());
-            continue;
-        }
-        let cf = match parse_config_file(f, &idiomatic_filenames).await {
-            Ok(cfg) => cfg,
-            Err(err) => {
-                let rel_path = f.strip_prefix(monorepo_root).unwrap_or(f);
-                warn!(
-                    "Failed to parse config file {}: {}. Tasks from this config will not be loaded.",
-                    rel_path.display(),
-                    err
-                );
-                continue;
-            }
-        };
-
-        config_map.insert(f.clone(), cf);
-    }
-    Ok(config_map)
-}
-
 async fn parse_config_file(
     f: &PathBuf,
     idiomatic_filenames: &BTreeMap<String, Vec<String>>,
@@ -1541,6 +1452,55 @@ impl Debug for Config {
     }
 }
 
+/// Collect all task templates from the config file hierarchy.
+/// Templates from child configs (closer to cwd) override templates from parent configs.
+fn collect_task_templates(config_files: &ConfigMap) -> IndexMap<String, TaskTemplate> {
+    let mut templates = IndexMap::new();
+
+    // Iterate in reverse order (global -> local) so child directories override parent configs
+    for cf in config_files.values().rev() {
+        for (name, template) in cf.task_templates() {
+            templates.insert(name, template);
+        }
+    }
+
+    templates
+}
+
+/// Resolve a task template and merge it into the task.
+/// Returns an error if the template is not found or if experimental mode is not enabled.
+fn resolve_task_template(
+    task: &mut Task,
+    templates: &IndexMap<String, TaskTemplate>,
+) -> Result<()> {
+    if let Some(template_name) = &task.extends {
+        if !Settings::get().experimental {
+            bail!(
+                "Task '{}' uses 'extends = \"{}\"' which requires 'experimental = true' in settings",
+                task.name,
+                template_name
+            );
+        }
+
+        let template = templates.get(template_name).ok_or_else(|| {
+            eyre!(
+                "Task '{}' extends template '{}' which was not found. \
+                 Available templates: {}",
+                task.name,
+                template_name,
+                if templates.is_empty() {
+                    "(none)".to_string()
+                } else {
+                    templates.keys().join(", ")
+                }
+            )
+        })?;
+
+        task.merge_template(template);
+    }
+    Ok(())
+}
+
 fn default_task_includes() -> Vec<String> {
     vec![
         "mise-tasks".to_string(),
@@ -1595,6 +1555,7 @@ fn prefix_monorepo_task_names(tasks: &mut [Task], dir: &Path, monorepo_root: &Pa
 async fn load_local_tasks_with_context(
     config: &Arc<Config>,
     ctx: Option<&crate::task::TaskLoadContext>,
+    templates: &IndexMap<String, TaskTemplate>,
 ) -> Result<Vec<Task>> {
     let mut tasks = vec![];
     let monorepo_config = find_monorepo_config(&config.config_files);
@@ -1612,7 +1573,7 @@ async fn load_local_tasks_with_context(
         if cfg!(test) && !d.starts_with(*dirs::HOME) {
             continue;
         }
-        let mut dir_tasks = load_tasks_in_dir(config, &d, &local_config_files).await?;
+        let mut dir_tasks = load_tasks_in_dir(config, &d, &local_config_files, templates).await?;
 
         if let Some(ref monorepo_root) = monorepo_root {
             prefix_monorepo_task_names(&mut dir_tasks, &d, monorepo_root);
@@ -1643,92 +1604,91 @@ async fn load_local_tasks_with_context(
         let subdirs = discover_monorepo_subdirs(monorepo_root, config_roots, ctx)?;
 
         // Load tasks from subdirectories in parallel
-        // This includes inherited tasks from parent directories up to monorepo root
         let subdir_tasks_futures: Vec<_> = subdirs
             .into_iter()
             .filter(|subdir| !cfg!(test) || subdir.starts_with(*dirs::HOME))
             .map(|subdir| {
                 let config = config.clone();
                 let monorepo_root = monorepo_root.clone();
+                let templates = templates.clone();
                 async move {
-                    // Load config hierarchy from subdirectory up to monorepo root
-                    // Returns configs in child→parent order (subdir first, monorepo_root last)
-                    let config_paths =
-                        load_config_hierarchy_to_monorepo_root(&subdir, &monorepo_root)?;
-
-                    // Load all config files in the hierarchy (tolerant of parse errors)
-                    // Reuses already-parsed configs from config.config_files to avoid re-parsing
-                    let config_files = load_config_files_tolerant(
-                        &config_paths,
-                        &config.config_files,
-                        &monorepo_root,
-                    )
-                    .await?;
-
-                    // Use an IndexMap to deduplicate tasks by name
-                    // Iterate in reverse order (parent→child) so child tasks override parent tasks
-                    // This matches the pattern used in ToolsetBuilder::load_config_files
+                    // Use IndexMap to deduplicate tasks by name within this subdirectory
+                    // Later inserts win, so file tasks override config tasks with the same name
                     let mut task_map: IndexMap<String, Task> = IndexMap::new();
 
-                    // Check if this subdirectory has its own config file.
-                    // We need to check for nested config paths like .config/mise/config.toml,
-                    // not just files directly in the subdirectory.
-                    let subdir_has_config = DEFAULT_CONFIG_FILENAMES
+                    // Load config files from subdirectory
+                    // Use .rev() so later files (like mise.local.toml) have higher precedence
+                    // Use glob() with .rev() for conf.d patterns so later files (02-override.toml) override earlier ones
+                    let config_paths: Vec<PathBuf> = DEFAULT_CONFIG_FILENAMES
                         .iter()
-                        .any(|f| subdir.join(f).exists());
+                        .rev()
+                        .flat_map(|f| {
+                            if f.contains('*') {
+                                glob(&subdir, f).unwrap_or_default().into_iter().rev().collect()
+                            } else {
+                                let path = subdir.join(f);
+                                if path.exists() {
+                                    vec![path]
+                                } else {
+                                    vec![]
+                                }
+                            }
+                        })
+                        .collect();
 
-                    for (_config_path, cf) in config_files.iter().rev() {
-                        // Load tasks from this config file
-                        let config_root = cf.config_root();
-                        let mut config_tasks =
-                            load_config_tasks(&config, cf.clone(), &config_root).await?;
-                        let mut file_tasks =
-                            load_file_tasks(&config, cf.clone(), &config_root).await?;
+                    // Deduplicate config paths while preserving precedence order
+                    let mut seen = std::collections::HashSet::new();
+                    let config_paths: Vec<PathBuf> = config_paths
+                        .into_iter()
+                        .filter(|p| seen.insert(p.clone()))
+                        .collect();
 
-                        // Combine tasks from this config
-                        let mut dir_tasks: Vec<Task> =
-                            config_tasks.drain(..).chain(file_tasks.drain(..)).collect();
+                    let found_config = !config_paths.is_empty();
+                    for config_path in config_paths {
+                        match config_file::parse(&config_path).await {
+                            Ok(cf) => {
+                                let mut subdir_tasks =
+                                    load_config_and_file_tasks(&config, cf.clone(), &templates).await?;
 
-                        // Store reference to config file for later use
-                        for task in dir_tasks.iter_mut() {
-                            task.cf = Some(cf.clone());
-                        }
+                                prefix_monorepo_task_names(&mut subdir_tasks, &subdir, &monorepo_root);
+                                for task in subdir_tasks.iter_mut() {
+                                    // Store reference to config file for later use
+                                    task.cf = Some(cf.clone());
+                                }
 
-                        // Add to task map - later configs override earlier ones
-                        // Use original task name (before prefixing) as the key
-                        for task in dir_tasks {
-                            task_map.insert(task.name.clone(), task);
+                                // Add tasks to map - later tasks override earlier ones with same name
+                                for task in subdir_tasks {
+                                    task_map.insert(task.name.clone(), task);
+                                }
+                            }
+                            Err(err) => {
+                                let rel_path = subdir
+                                    .strip_prefix(&monorepo_root)
+                                    .unwrap_or(&subdir);
+                                warn!(
+                                    "Failed to parse config file {} in monorepo subdirectory {}: {}. Tasks from this directory will not be loaded.",
+                                    config_path.display(),
+                                    rel_path.display(),
+                                    err
+                                );
+                            }
                         }
                     }
 
-                    // If no config file exists in the subdirectory itself, still load
-                    // default task include dirs (e.g., .mise/tasks). This handles
-                    // "include-only" subdirs that have task files but no mise.toml.
-                    //
-                    // Note: We intentionally use the global config map here, not the per-subdir
-                    // hierarchy. This means custom `includes` settings from parent configs do NOT
-                    // affect include-only subdirs—they always use default include paths. If users
-                    // want custom includes in a subdir, they should add a mise.toml there.
-                    if !subdir_has_config {
+                    // If no config file exists, still load default task include dirs
+                    if !found_config {
                         let includes = task_includes_for_dir(&subdir, &config.config_files);
                         for include in includes {
-                            let mut include_tasks =
+                            let mut subdir_tasks =
                                 load_tasks_includes(&config, &include, &subdir).await?;
-                            for task in include_tasks.drain(..) {
+                            prefix_monorepo_task_names(&mut subdir_tasks, &subdir, &monorepo_root);
+                            for task in subdir_tasks {
                                 task_map.insert(task.name.clone(), task);
                             }
                         }
                     }
 
-                    // Convert map to vec and prefix all tasks with the subdirectory path
-                    // Note: We keep the original config_root so inherited tasks run from where
-                    // they are defined (matching non-monorepo behavior). Task authors can use
-                    // dir = "{{cwd}}" if they want the task to run from wherever it's invoked.
-                    let mut all_tasks: Vec<Task> = task_map.into_values().collect();
-
-                    prefix_monorepo_task_names(&mut all_tasks, &subdir, &monorepo_root);
-
-                    Ok::<Vec<Task>, eyre::Report>(all_tasks)
+                    Ok::<Vec<Task>, eyre::Report>(task_map.into_values().collect())
                 }
             })
             .collect();
@@ -1995,7 +1955,10 @@ fn discover_monorepo_subdirs(
     Ok(subdirs)
 }
 
-async fn load_global_tasks(config: &Arc<Config>) -> Result<Vec<Task>> {
+async fn load_global_tasks(
+    config: &Arc<Config>,
+    templates: &IndexMap<String, TaskTemplate>,
+) -> Result<Vec<Task>> {
     let config_files = config
         .config_files
         .values()
@@ -2003,7 +1966,7 @@ async fn load_global_tasks(config: &Arc<Config>) -> Result<Vec<Task>> {
         .collect::<Vec<_>>();
     let mut tasks = vec![];
     for cf in config_files {
-        tasks.extend(load_config_and_file_tasks(config, cf.clone()).await?);
+        tasks.extend(load_config_and_file_tasks(config, cf.clone(), templates).await?);
     }
     Ok(tasks)
 }
@@ -2011,9 +1974,10 @@ async fn load_global_tasks(config: &Arc<Config>) -> Result<Vec<Task>> {
 async fn load_config_and_file_tasks(
     config: &Arc<Config>,
     cf: Arc<dyn ConfigFile>,
+    templates: &IndexMap<String, TaskTemplate>,
 ) -> Result<Vec<Task>> {
     let config_root = cf.config_root();
-    let tasks = load_config_tasks(config, cf.clone(), &config_root).await?;
+    let tasks = load_config_tasks(config, cf.clone(), &config_root, templates).await?;
     let file_tasks = load_file_tasks(config, cf.clone(), &config_root).await?;
     Ok(tasks.into_iter().chain(file_tasks).collect())
 }
@@ -2022,6 +1986,7 @@ async fn load_config_tasks(
     config: &Arc<Config>,
     cf: Arc<dyn ConfigFile>,
     config_root: &Path,
+    templates: &IndexMap<String, TaskTemplate>,
 ) -> Result<Vec<Task>> {
     let is_global = is_global_config(cf.get_path());
     let config_root = Arc::new(config_root.to_path_buf());
@@ -2033,6 +1998,8 @@ async fn load_config_tasks(
         if is_global {
             t.global = true;
         }
+        // Resolve template if the task extends one
+        resolve_task_template(&mut t, templates)?;
         match t.render(&config, &config_root).await {
             Ok(()) => {
                 tasks.push(t);
@@ -2097,6 +2064,50 @@ async fn resolve_git_url_to_path(git_url: &str) -> Result<PathBuf> {
     }
 }
 
+/// Check if a pattern contains glob metacharacters
+fn is_glob_pattern(pattern: &str) -> bool {
+    // Check for unescaped glob metacharacters: *, ?, [, ], {, }
+    // Note: This is a simple check that may have false positives with escaped chars,
+    // but glob() will handle those correctly
+    pattern.contains('*')
+        || pattern.contains('?')
+        || pattern.contains('[')
+        || pattern.contains(']')
+        || pattern.contains('{')
+        || pattern.contains('}')
+}
+
+/// Expand a task include pattern (which may be a glob) to a list of paths
+fn expand_task_include(dir: &Path, pattern: &str) -> Vec<PathBuf> {
+    if is_glob_pattern(pattern) {
+        match glob(dir, pattern) {
+            Ok(paths) => paths,
+            Err(err) => {
+                warn!(
+                    "failed to expand glob pattern '{}' in '{}': {}",
+                    pattern,
+                    display_path(dir),
+                    err
+                );
+                vec![]
+            }
+        }
+    } else {
+        // Literal path
+        let path = PathBuf::from(pattern);
+        let resolved = if path.is_absolute() {
+            path
+        } else {
+            dir.join(path)
+        };
+        if resolved.exists() {
+            vec![resolved]
+        } else {
+            vec![]
+        }
+    }
+}
+
 async fn load_file_tasks(
     config: &Arc<Config>,
     cf: Arc<dyn ConfigFile>,
@@ -2110,42 +2121,49 @@ async fn load_file_tasks(
 
     let mut tasks = vec![];
     let config_root = Arc::new(config_root.to_path_buf());
+    let cf_dir = cf.get_path().parent().unwrap();
 
     for include in includes {
-        let path = if include.starts_with("git::") {
-            resolve_git_url_to_path(&include).await?
+        let paths = if include.starts_with("git::") {
+            vec![resolve_git_url_to_path(&include).await?]
         } else {
-            cf.get_path().parent().unwrap().join(&include)
+            expand_task_include(cf_dir, &include)
         };
-        tasks.extend(load_tasks_includes(config, &path, &config_root).await?);
+        for path in paths {
+            tasks.extend(load_tasks_includes(config, &path, &config_root).await?);
+        }
     }
     Ok(tasks)
 }
 
 pub fn task_includes_for_dir(dir: &Path, config_files: &ConfigMap) -> Vec<PathBuf> {
-    configs_at_root(dir, config_files)
+    let configs = configs_at_root(dir, config_files);
+
+    // Find the first config that has explicit task_config.includes
+    // and resolve paths relative to that config file's directory
+    let (includes, resolve_dir) = configs
         .iter()
         .rev()
-        .find_map(|cf| cf.task_config().includes.clone())
-        .unwrap_or_else(default_task_includes)
+        .find_map(|cf| {
+            cf.task_config().includes.clone().map(|includes| {
+                // Resolve relative paths from the config file's directory, not the search directory
+                let cf_dir = cf.get_path().parent().unwrap_or(dir);
+                (includes, cf_dir.to_path_buf())
+            })
+        })
+        .unwrap_or_else(|| {
+            // Default includes should be resolved relative to the search directory
+            (default_task_includes(), dir.to_path_buf())
+        });
+
+    includes
         .into_iter()
-        .filter_map(|p| {
-            // Git URLs will be handled by load_file_tasks
+        .flat_map(|p| {
+            // Git URLs are handled by load_file_tasks, not here
             if p.starts_with("git::") {
-                None
-            } else {
-                let path = PathBuf::from(p);
-                let resolved = if path.is_absolute() {
-                    path
-                } else {
-                    dir.join(path)
-                };
-                if resolved.exists() {
-                    Some(resolved)
-                } else {
-                    None
-                }
+                return vec![];
             }
+            expand_task_include(&resolve_dir, &p)
         })
         .unique()
         .collect::<Vec<_>>()
@@ -2155,6 +2173,7 @@ pub async fn load_tasks_in_dir(
     config: &Arc<Config>,
     dir: &Path,
     config_files: &ConfigMap,
+    templates: &IndexMap<String, TaskTemplate>,
 ) -> Result<Vec<Task>> {
     let configs = configs_at_root(dir, config_files);
 
@@ -2170,7 +2189,7 @@ pub async fn load_tasks_in_dir(
     let mut config_tasks = vec![];
     for cf in &configs {
         let dir = dir.to_path_buf();
-        config_tasks.extend(load_config_tasks(config, (*cf).clone(), &dir).await?);
+        config_tasks.extend(load_config_tasks(config, (*cf).clone(), &dir, templates).await?);
     }
 
     let mut file_tasks = vec![];
