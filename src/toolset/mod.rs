@@ -3,6 +3,8 @@ use std::fmt::{Display, Formatter};
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use serde::Serialize;
+
 use crate::backend::Backend;
 use crate::cli::args::BackendArg;
 use crate::config::Config;
@@ -45,6 +47,12 @@ mod tool_version_options;
 mod toolset_env;
 mod toolset_install;
 mod toolset_paths;
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ToolInfo {
+    pub version: String,
+    pub path: String,
+}
 
 /// a toolset is a collection of tools for various plugins
 ///
@@ -303,12 +311,30 @@ impl Toolset {
         outdated.into_iter().flatten().collect()
     }
 
+    pub fn build_tools_tera_map(&self, config: &Arc<Config>) -> HashMap<String, ToolInfo> {
+        let mut tools_map: HashMap<String, ToolInfo> = HashMap::new();
+        for (_, tv) in self.list_current_installed_versions(config) {
+            let tool_name = tv.ba().tool_name.clone();
+            let short = tv.ba().short.clone();
+            let info = ToolInfo {
+                version: tv.version.clone(),
+                path: tv.install_path().to_string_lossy().to_string(),
+            };
+            tools_map.entry(tool_name.clone()).or_insert(info.clone());
+            if short != tool_name {
+                tools_map.entry(short).or_insert(info);
+            }
+        }
+        tools_map
+    }
+
     pub async fn tera_ctx(&self, config: &Arc<Config>) -> Result<&tera::Context> {
         self.tera_ctx
             .get_or_try_init(async || {
                 let env = self.full_env(config).await?;
                 let mut ctx = config.tera_ctx.clone();
                 ctx.insert("env", &env);
+                ctx.insert("tools", &self.build_tools_tera_map(config));
                 Ok(ctx)
             })
             .await
@@ -438,9 +464,16 @@ pub async fn get_versions_needed_by_tracked_configs(
     config: &Arc<Config>,
 ) -> Result<std::collections::HashSet<(String, String)>> {
     let mut needed = std::collections::HashSet::new();
+    // Use use_locked_version: false to resolve based on what config files actually
+    // request, not what was previously locked. This is important during upgrade
+    // because the lockfile hasn't been updated yet when this is called.
+    let opts = ResolveOptions {
+        use_locked_version: false,
+        ..Default::default()
+    };
     for cf in config.get_tracked_config_files().await?.values() {
         let mut ts = Toolset::from(cf.to_tool_request_set()?);
-        ts.resolve(config).await?;
+        ts.resolve_with_opts(config, &opts).await?;
         for (_, tv) in ts.list_current_versions() {
             needed.insert((tv.ba().short.to_string(), tv.tv_pathname()));
         }

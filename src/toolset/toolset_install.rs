@@ -78,10 +78,15 @@ impl Toolset {
                     // TODO: handle this case with multiple versions
                     continue;
                 }
-                let options = tvl.backend.opts();
-                // TODO: tr.options() probably should be Option<ToolVersionOptions>
-                // to differentiate between no options and empty options
-                // without that it might not be possible to unset the options if they are set
+                // Use config request options if available, falling back to backend arg opts.
+                // This ensures tool options like postinstall from mise.toml are preserved
+                // when installing with an explicit CLI version (e.g. `mise install tool@latest`).
+                let options = tvl
+                    .requests
+                    .first()
+                    .map(|r| r.options())
+                    .filter(|opts| !opts.is_empty())
+                    .unwrap_or_else(|| tvl.backend.opts());
                 if tr.options().is_empty() || tr.options() != options {
                     tr.set_options(options);
                 }
@@ -187,12 +192,21 @@ impl Toolset {
 
         // Skip hooks in dry-run mode
         if !opts.dry_run {
-            // Run post-install hook with installed tools info (ignoring errors)
+            // Run post-install hook with installed tools info
+            // Use the full resolved toolset so all installed tools are on PATH
+            // Fall back to self if toolset resolution fails (e.g. due to config issues)
             let installed_tools: Vec<InstalledToolInfo> =
                 installed.iter().map(InstalledToolInfo::from).collect();
-            let _ = hooks::run_one_hook_with_context(
+            let ts = match config.get_toolset().await {
+                Ok(ts) => ts,
+                Err(e) => {
+                    debug!("error resolving toolset for postinstall hook: {e:#}");
+                    self
+                }
+            };
+            hooks::run_one_hook_with_context(
                 config,
-                self,
+                ts,
                 Hooks::Postinstall,
                 None,
                 Some(&installed_tools),

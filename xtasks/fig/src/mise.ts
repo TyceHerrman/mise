@@ -821,7 +821,9 @@ const completionSpec: Fig.Spec = {
             },
             {
               name: "value",
-              description: "The value to set the key to",
+              description:
+                "The value to set the key to (optional if provided as KEY=VALUE)",
+              isOptional: true,
             },
           ],
         },
@@ -1432,6 +1434,12 @@ const completionSpec: Fig.Spec = {
           },
         },
         {
+          name: "--dry-run-code",
+          description:
+            "Like --dry-run but exits with code 1 if there are tools to install",
+          isRepeatable: false,
+        },
+        {
           name: "--raw",
           description:
             "Directly pipe stdin/stdout/stderr from plugin to user Sets --jobs=1",
@@ -1586,6 +1594,11 @@ const completionSpec: Fig.Spec = {
         {
           name: ["-m", "--missing"],
           description: "Display missing tool versions",
+          isRepeatable: false,
+        },
+        {
+          name: "--all-sources",
+          description: "Display all tracked config sources for tools",
           isRepeatable: false,
         },
         {
@@ -1921,6 +1934,12 @@ const completionSpec: Fig.Spec = {
           isRepeatable: false,
         },
         {
+          name: "--dry-run-code",
+          description:
+            "Like --dry-run but exits with code 1 if there are tools to prune",
+          isRepeatable: false,
+        },
+        {
           name: "--tools",
           description: "Prune only unused versions of tools",
           isRepeatable: false,
@@ -2221,6 +2240,11 @@ const completionSpec: Fig.Spec = {
           description: "Prompt for environment variable values",
           isRepeatable: false,
         },
+        {
+          name: "--stdin",
+          description: "Read the value from stdin (for multiline input)",
+          isRepeatable: false,
+        },
       ],
       args: {
         name: "env_var",
@@ -2256,7 +2280,9 @@ const completionSpec: Fig.Spec = {
             },
             {
               name: "value",
-              description: "The value to set",
+              description:
+                "The value to set (optional if provided as KEY=VALUE)",
+              isOptional: true,
             },
           ],
         },
@@ -2337,7 +2363,9 @@ const completionSpec: Fig.Spec = {
             },
             {
               name: "value",
-              description: "The value to set",
+              description:
+                "The value to set (optional if provided as KEY=VALUE)",
+              isOptional: true,
             },
           ],
         },
@@ -2469,7 +2497,9 @@ const completionSpec: Fig.Spec = {
             },
             {
               name: "command",
-              description: "The command to run",
+              description:
+                "The command to run (optional if provided as ALIAS=COMMAND)",
+              isOptional: true,
             },
           ],
         },
@@ -3192,6 +3222,12 @@ const completionSpec: Fig.Spec = {
           description: "Do not actually delete anything",
           isRepeatable: false,
         },
+        {
+          name: "--dry-run-code",
+          description:
+            "Like --dry-run but exits with code 1 if there are tools to uninstall",
+          isRepeatable: false,
+        },
       ],
       args: {
         name: "installed_tool@version",
@@ -3322,6 +3358,12 @@ const completionSpec: Fig.Spec = {
           },
         },
         {
+          name: "--dry-run-code",
+          description:
+            "Like --dry-run but exits with code 1 if there are outdated tools",
+          isRepeatable: false,
+        },
+        {
           name: "--raw",
           description:
             "Directly pipe stdin/stdout/stderr from plugin to user Sets --jobs=1",
@@ -3392,6 +3434,12 @@ const completionSpec: Fig.Spec = {
           args: {
             name: "before",
           },
+        },
+        {
+          name: "--dry-run-code",
+          description:
+            "Like --dry-run but exits with code 1 if there are changes to make",
+          isRepeatable: false,
         },
         {
           name: "--fuzzy",

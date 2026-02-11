@@ -1,5 +1,180 @@
 # Changelog
 
+## [2026.2.9](https://github.com/jdx/mise/compare/v2026.2.8..v2026.2.9) - 2026-02-10
+
+### 🚀 Features
+
+- auto-select no-YJIT Ruby on older glibc systems by @jdx in [#8069](https://github.com/jdx/mise/pull/8069)
+
+### 🐛 Bug Fixes
+
+- **(shim)** update mise-shim.exe during self-update on Windows by @jdx in [#8075](https://github.com/jdx/mise/pull/8075)
+- Bump xx to 2.5 by @erickt in [#8077](https://github.com/jdx/mise/pull/8077)
+
+### 📚 Documentation
+
+- **(ruby)** remove experimental language for precompiled binaries by @jdx in [#8073](https://github.com/jdx/mise/pull/8073)
+
+### New Contributors
+
+- @erickt made their first contribution in [#8077](https://github.com/jdx/mise/pull/8077)
+
+### 📦 Aqua Registry Updates
+
+#### Updated Packages (1)
+
+- [`carthage-software/mago`](https://github.com/carthage-software/mago)
+
+## [2026.2.8](https://github.com/jdx/mise/compare/v2026.2.7..v2026.2.8) - 2026-02-09
+
+### 🚀 Features
+
+- **(node)** support package.json as idiomatic version file by @jdx in [#8059](https://github.com/jdx/mise/pull/8059)
+- **(ruby)** graduate precompiled ruby from experimental (gradual rollout) by @jdx in [#8052](https://github.com/jdx/mise/pull/8052)
+- add --dry-run-code flag to exit non-zero when there is work to do by @jdx in [#8063](https://github.com/jdx/mise/pull/8063)
+
+### 🐛 Bug Fixes
+
+- **(core)** respect MISE_ARCH override in bun and erlang plugins by @jdx in [#8062](https://github.com/jdx/mise/pull/8062)
+- **(hooks)** resolve 12 community-reported hooks issues by @jdx in [#8058](https://github.com/jdx/mise/pull/8058)
+- accept key=value format in set/add subcommands by @jdx in [#8053](https://github.com/jdx/mise/pull/8053)
+
+### 📚 Documentation
+
+- bump action versions in GitHub Actions examples by @muzimuzhi in [#8065](https://github.com/jdx/mise/pull/8065)
+- add opengraph meta tags by @jdx in [#8066](https://github.com/jdx/mise/pull/8066)
+
+### 📦️ Dependency Updates
+
+- upgrade toml to 0.9 and toml_edit to 0.24 (TOML 1.1) by @jdx in [#8057](https://github.com/jdx/mise/pull/8057)
+
+### 📦 Registry
+
+- add quicktype (npm:quicktype) by @zdunecki in [#8054](https://github.com/jdx/mise/pull/8054)
+- use inline table for test definitions by @jdx in [#8056](https://github.com/jdx/mise/pull/8056)
+
+## [2026.2.7](https://github.com/jdx/mise/compare/v2026.2.6..v2026.2.7) - 2026-02-08
+
+### 🚀 Features
+
+- **(shim)** add native .exe shim mode for Windows by @jdx in [#8045](https://github.com/jdx/mise/pull/8045)
+
+### 🐛 Bug Fixes
+
+- **(install)** preserve config options and registry defaults by @jdx in [#8044](https://github.com/jdx/mise/pull/8044)
+- **(link)** linked versions override lockfile during resolution by @jdx in [#8050](https://github.com/jdx/mise/pull/8050)
+- **(release)** preserve aqua-registry sections in changelog across releases by @jdx in [#8047](https://github.com/jdx/mise/pull/8047)
+- ls --all-sources shows duplicate entries by @roele in [#8042](https://github.com/jdx/mise/pull/8042)
+
+### 📚 Documentation
+
+- replace "inherit" terminology with config layering by @jdx in [#8046](https://github.com/jdx/mise/pull/8046)
+
+### 📦 Registry
+
+- switch oxlint to npm backend by default by @risu729 in [#8038](https://github.com/jdx/mise/pull/8038)
+- add orval (npm:orval) by @zdunecki in [#8051](https://github.com/jdx/mise/pull/8051)
+
+### New Contributors
+
+- @zdunecki made their first contribution in [#8051](https://github.com/jdx/mise/pull/8051)
+
+## [2026.2.6](https://github.com/jdx/mise/compare/v2026.2.5..v2026.2.6) - 2026-02-07
+
+### 🚀 Features
+
+- **(env)** add shell-style variable expansion in env values by @jdx in [#8029](https://github.com/jdx/mise/pull/8029)
+- **(list)** add --all-sources flag to list command by @TylerHillery in [#8019](https://github.com/jdx/mise/pull/8019)
+
+### 🐛 Bug Fixes
+
+- **(gem)** Windows support for gem backend by @my1e5 in [#8031](https://github.com/jdx/mise/pull/8031)
+- **(gem)** revert gem.rs script newline change by @my1e5 in [#8034](https://github.com/jdx/mise/pull/8034)
+- **(lock)** write tools to lockfile matching their source config by @jdx in [#8012](https://github.com/jdx/mise/pull/8012)
+- **(ls)** sort sources deterministically in --all-sources output by @jdx in [#8037](https://github.com/jdx/mise/pull/8037)
+- **(task)** auto-install tools from mise.toml for file tasks by @jdx in [#8030](https://github.com/jdx/mise/pull/8030)
+
+### 📚 Documentation
+
+- fix wrong positions of `mise run` flags by @muzimuzhi in [#8036](https://github.com/jdx/mise/pull/8036)
+
+### 📦️ Dependency Updates
+
+- update ghcr.io/jdx/mise:copr docker digest to 3e00d7d by @renovate[bot] in [#8023](https://github.com/jdx/mise/pull/8023)
+- update ghcr.io/jdx/mise:alpine docker digest to 0ced1b3 by @renovate[bot] in [#8022](https://github.com/jdx/mise/pull/8022)
+
+### 📦 Registry
+
+- add tirith ([github:sheeki03/tirith](https://github.com/sheeki03/tirith)) by @sheeki03 in [#8024](https://github.com/jdx/mise/pull/8024)
+- add mas by @TyceHerrman in [#8032](https://github.com/jdx/mise/pull/8032)
+
+### Security
+
+- **(deps)** update time crate to 0.3.47 to fix RUSTSEC-2026-0009 by @jdx in [#8026](https://github.com/jdx/mise/pull/8026)
+
+### New Contributors
+
+- @sheeki03 made their first contribution in [#8024](https://github.com/jdx/mise/pull/8024)
+- @TylerHillery made their first contribution in [#8019](https://github.com/jdx/mise/pull/8019)
+
+### 📦 Aqua Registry Updates
+
+#### New Packages (1)
+
+- [`kubernetes-sigs/kubectl-validate`](https://github.com/kubernetes-sigs/kubectl-validate)
+
+#### Updated Packages (6)
+
+- [`flux-iac/tofu-controller/tfctl`](https://github.com/flux-iac/tofu-controller/tfctl)
+- [`gogs/gogs`](https://github.com/gogs/gogs)
+- [`j178/prek`](https://github.com/j178/prek)
+- [`syncthing/syncthing`](https://github.com/syncthing/syncthing)
+- [`tuist/tuist`](https://github.com/tuist/tuist)
+- [`yaml/yamlscript`](https://github.com/yaml/yamlscript)
+## [2026.2.5](https://github.com/jdx/mise/compare/v2026.2.4..v2026.2.5) - 2026-02-06
+
+### 🐛 Bug Fixes
+
+- **(lock)** remove experimental flag requirement for lockfiles by @jdx in [#8011](https://github.com/jdx/mise/pull/8011)
+
+### Chore
+
+- add tone calibration to release notes prompt by @jdx in [#8010](https://github.com/jdx/mise/pull/8010)
+
+## [2026.2.4](https://github.com/jdx/mise/compare/v2026.2.3..v2026.2.4) - 2026-02-05
+
+### 🐛 Bug Fixes
+
+- **(env)** resolve sourced env for tool templates by @corymhall in [#7895](https://github.com/jdx/mise/pull/7895)
+- **(npm)** only declare the configured package manager as a dependency by @jdx in [#7995](https://github.com/jdx/mise/pull/7995)
+- **(upgrade)** respect use_locked_version when checking tracked configs by @jdx in [#7997](https://github.com/jdx/mise/pull/7997)
+- ignore MISE_TOOL_VERSION in env var parsing by @jdx in [#8004](https://github.com/jdx/mise/pull/8004)
+
+### New Contributors
+
+- @corymhall made their first contribution in [#7895](https://github.com/jdx/mise/pull/7895)
+
+## [2026.2.3](https://github.com/jdx/mise/compare/v2026.2.2..v2026.2.3) - 2026-02-04
+
+### 🐛 Bug Fixes
+
+- **(install)** allow pipx/npm/cargo/asdf backends to work in locked mode by @jdx in [#7985](https://github.com/jdx/mise/pull/7985)
+
+### 📦️ Dependency Updates
+
+- update bytes to 1.11.1 to fix RUSTSEC-2026-0007 by @jdx in [#7986](https://github.com/jdx/mise/pull/7986)
+
+### 📦 Registry
+
+- add mermaid-ascii by @TyceHerrman in [#7984](https://github.com/jdx/mise/pull/7984)
+- add godot ([aqua:godotengine/godot](https://github.com/godotengine/godot)) by @dmarcoux in [#7989](https://github.com/jdx/mise/pull/7989)
+- add julia (http:julia) by @quinnj in [#7990](https://github.com/jdx/mise/pull/7990)
+
+### New Contributors
+
+- @quinnj made their first contribution in [#7990](https://github.com/jdx/mise/pull/7990)
+- @dmarcoux made their first contribution in [#7989](https://github.com/jdx/mise/pull/7989)
+
 ## [2026.2.2](https://github.com/jdx/mise/compare/v2026.2.1..v2026.2.2) - 2026-02-03
 
 ### 🚀 Features
@@ -35,20 +210,6 @@
 
 - @gogolok made their first contribution in [#7980](https://github.com/jdx/mise/pull/7980)
 
-### 📦 Aqua Registry Updates
-
-#### New Packages (4)
-
-- [`autobrr/mkbrr`](https://github.com/autobrr/mkbrr)
-- [`dodobrands/Peekie`](https://github.com/dodobrands/Peekie)
-- [`grpc/grpc-java/protoc-gen-grpc-java`](https://github.com/grpc/grpc-java/protoc-gen-grpc-java)
-- [`str4d/age-plugin-yubikey`](https://github.com/str4d/age-plugin-yubikey)
-
-#### Updated Packages (3)
-
-- [`biomejs/biome`](https://github.com/biomejs/biome)
-- [`rust-cross/cargo-zigbuild`](https://github.com/rust-cross/cargo-zigbuild)
-- [`siderolabs/talos`](https://github.com/siderolabs/talos)
 ## [2026.2.1](https://github.com/jdx/mise/compare/v2026.2.0..v2026.2.1) - 2026-02-02
 
 ### 🚀 Features

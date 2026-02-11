@@ -7,8 +7,7 @@ use std::{collections::BTreeMap, sync::Arc};
 
 use crate::backend::ABackend;
 use crate::cli::args::BackendArg;
-use crate::config::Config;
-use crate::env;
+use crate::config::{Config, Settings};
 #[cfg(windows)]
 use crate::file;
 use crate::hash::hash_to_str;
@@ -50,6 +49,7 @@ impl ToolVersion {
     ) -> Result<Self> {
         trace!("resolving {} {}", &request, opts);
         if opts.use_locked_version
+            && !has_linked_version(request.ba())
             && let Some(lt) = request.lockfile_resolve(config)?
         {
             let mut tv = Self::new(request.clone(), lt.version);
@@ -226,15 +226,19 @@ impl ToolVersion {
             return build(v);
         }
 
+        let settings = Settings::get();
+        let is_offline = settings.offline();
+
         if v == "latest" {
             if !opts.latest_versions
                 && let Some(v) = backend.latest_installed_version(None)?
             {
                 return build(v);
             }
-            if let Some(v) = backend
-                .latest_version_with_opts(config, None, opts.before_date)
-                .await?
+            if !is_offline
+                && let Some(v) = backend
+                    .latest_version_with_opts(config, None, opts.before_date)
+                    .await?
             {
                 return build(v);
             }
@@ -248,12 +252,14 @@ impl ToolVersion {
                 return build(v.clone());
             }
         }
+        // When OFFLINE, skip ALL remote version fetching regardless of version format
+        if is_offline {
+            return build(v);
+        }
         // In prefer-offline mode (hook-env, activate, exec), skip remote version
         // fetching for fully-qualified versions (e.g. "2.3.2") that aren't installed.
         // Prefix versions like "2" still need remote resolution to find e.g. "2.1.0".
-        if env::PREFER_OFFLINE.load(std::sync::atomic::Ordering::Relaxed)
-            && v.matches('.').count() >= 2
-        {
+        if settings.prefer_offline() && v.matches('.').count() >= 2 {
             return build(v);
         }
         // First try with date filter (common case)
@@ -410,6 +416,27 @@ impl Default for ResolveOptions {
             before_date: None,
         }
     }
+}
+
+/// Check if a tool has any user-linked versions (created by `mise link`).
+/// A linked version is an installed version whose path is a symlink to an absolute path,
+/// as opposed to runtime symlinks which point to relative paths (starting with "./").
+fn has_linked_version(ba: &BackendArg) -> bool {
+    let installs_dir = &ba.installs_path;
+    let Ok(entries) = std::fs::read_dir(installs_dir) else {
+        return false;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if let Ok(Some(target)) = crate::file::resolve_symlink(&path) {
+            // Runtime symlinks start with "./" (e.g., latest -> ./1.35.0)
+            // User-linked symlinks point to absolute paths (e.g., brew -> /opt/homebrew/opt/hk)
+            if target.is_absolute() {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 impl Display for ResolveOptions {

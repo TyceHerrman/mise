@@ -782,7 +782,7 @@ List all tracked config files
 .SH "MISE CONFIG SET"
 Set the value of a setting in a mise.toml file
 .PP
-\fBUsage:\fR mise config set [OPTIONS] <KEY> <VALUE>
+\fBUsage:\fR mise config set [OPTIONS] <KEY> [<VALUE>]
 .PP
 \fBOptions:\fR
 .PP
@@ -803,7 +803,7 @@ If not provided, the nearest mise.toml file will be used
 The path of the config to display
 .TP
 \fB<VALUE>\fR
-The value to set the key to
+The value to set the key to (optional if provided as KEY=VALUE)
 .SH "MISE DOCTOR"
 Check mise installation for possible problems
 .PP
@@ -1259,6 +1259,11 @@ Only install versions released before this date
 
 Supports absolute dates like "2024\-06\-01" and relative durations like "90d" or "1y".
 .TP
+\fB\-\-dry\-run\-code\fR
+Like \-\-dry\-run but exits with code 1 if there are tools to install
+
+This is useful for scripts to check if tools need to be installed.
+.TP
 \fB\-\-raw\fR
 Directly pipe stdin/stdout/stderr from plugin to user Sets \-\-jobs=1
 \fBArguments:\fR
@@ -1392,6 +1397,9 @@ Display missing tool versions
 Don't fetch information such as outdated versions
 .TP
 \fB\-p, \-\-plugin\fR \fI<TOOL_FLAG>\fR
+.TP
+\fB\-\-all\-sources\fR
+Display all tracked config sources for tools
 .TP
 \fB\-\-no\-header\fR
 Don't display headers
@@ -1687,6 +1695,11 @@ Do not actually delete anything
 \fB\-\-configs\fR
 Prune only tracked and trusted configuration links that point to non\-existent configurations
 .TP
+\fB\-\-dry\-run\-code\fR
+Like \-\-dry\-run but exits with code 1 if there are tools to prune
+
+This is useful for scripts to check if tools need to be pruned.
+.TP
 \fB\-\-tools\fR
 Prune only unused versions of tools
 \fBArguments:\fR
@@ -1976,6 +1989,11 @@ Prompt for environment variable values
 Remove the environment variable from config file
 
 Can be used multiple times.
+.TP
+\fB\-\-stdin\fR
+Read the value from stdin (for multiline input)
+
+When using \-\-stdin, provide a single key without a value. The value will be read from stdin until EOF.
 \fBArguments:\fR
 .PP
 .TP
@@ -2026,7 +2044,7 @@ Adds a setting to the configuration file
 Used with an array setting, this will append the value to the array.
 This modifies the contents of ~/.config/mise/config.toml
 .PP
-\fBUsage:\fR mise settings add [OPTIONS] <SETTING> <VALUE>
+\fBUsage:\fR mise settings add [OPTIONS] <SETTING> [<VALUE>]
 .PP
 \fBOptions:\fR
 .PP
@@ -2040,7 +2058,7 @@ Use the local config file instead of the global one
 The setting to set
 .TP
 \fB<VALUE>\fR
-The value to set
+The value to set (optional if provided as KEY=VALUE)
 .SH "MISE SETTINGS GET"
 Show a current setting
 
@@ -2103,7 +2121,7 @@ This modifies the contents of ~/.config/mise/config.toml by default.
 With `\-\-local`, modifies the local config file instead.
 See https://mise.jdx.dev/configuration.html#target\-file\-for\-write\-operations
 .PP
-\fBUsage:\fR mise settings set [OPTIONS] <SETTING> <VALUE>
+\fBUsage:\fR mise settings set [OPTIONS] <SETTING> [<VALUE>]
 .PP
 \fBOptions:\fR
 .PP
@@ -2117,7 +2135,7 @@ Use the local config file instead of the global one
 The setting to set
 .TP
 \fB<VALUE>\fR
-The value to set
+The value to set (optional if provided as KEY=VALUE)
 .SH "MISE SETTINGS UNSET"
 Clears a setting
 
@@ -2200,7 +2218,7 @@ Add/update a shell alias
 
 This modifies the contents of ~/.config/mise/config.toml
 .PP
-\fBUsage:\fR mise shell\-alias set <shell_alias> <COMMAND>
+\fBUsage:\fR mise shell\-alias set <shell_alias> [<COMMAND>]
 .PP
 \fBArguments:\fR
 .PP
@@ -2209,7 +2227,7 @@ This modifies the contents of ~/.config/mise/config.toml
 The alias name
 .TP
 \fB<COMMAND>\fR
-The command to run
+The command to run (optional if provided as ALIAS=COMMAND)
 .SH "MISE SHELL-ALIAS UNSET"
 Removes a shell alias
 
@@ -2764,6 +2782,11 @@ Delete all installed versions
 .TP
 \fB\-n, \-\-dry\-run\fR
 Do not actually delete anything
+.TP
+\fB\-\-dry\-run\-code\fR
+Like \-\-dry\-run but exits with code 1 if there are tools to uninstall
+
+This is useful for scripts to check if tools need to be uninstalled.
 \fBArguments:\fR
 .PP
 .TP
@@ -2877,6 +2900,11 @@ This can be useful for reproducibility or security purposes.
 This only affects fuzzy version matches like "20" or "latest".
 Explicitly pinned versions like "22.5.0" are not filtered.
 .TP
+\fB\-\-dry\-run\-code\fR
+Like \-\-dry\-run but exits with code 1 if there are outdated tools
+
+This is useful for scripts to check if tools need to be upgraded.
+.TP
 \fB\-\-raw\fR
 Directly pipe stdin/stdout/stderr from plugin to user Sets \-\-jobs=1
 \fBArguments:\fR
@@ -2935,6 +2963,11 @@ If a directory is specified, it will look for a config file in that directory fo
 Only install versions released before this date
 
 Supports absolute dates like "2024\-06\-01" and relative durations like "90d" or "1y".
+.TP
+\fB\-\-dry\-run\-code\fR
+Like \-\-dry\-run but exits with code 1 if there are changes to make
+
+This is useful for scripts to check if tools need to be added or removed.
 .TP
 \fB\-\-fuzzy\fR
 Save fuzzy version to config file

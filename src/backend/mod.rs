@@ -445,6 +445,14 @@ pub trait Backend: Debug + Send + Sync {
             true // Core plugins and plugins without remote URLs can use versions host
         };
 
+        if Settings::get().offline() {
+            trace!(
+                "Skipping remote version listing for {} due to offline mode",
+                ba.to_string()
+            );
+            return Ok(vec![]);
+        }
+
         let versions = remote_versions
             .get_or_try_init_async(|| async {
                 trace!("Listing remote versions for {}", ba.to_string());
@@ -818,6 +826,12 @@ pub trait Backend: Debug + Send + Sync {
             .unwrap_or_default())
     }
     async fn parse_idiomatic_file(&self, path: &Path) -> eyre::Result<String> {
+        if path.file_name().is_some_and(|f| f == "package.json") {
+            let pkg = crate::package_json::PackageJson::parse(path)?;
+            return pkg
+                .package_manager_version(self.id())
+                .ok_or_else(|| eyre::eyre!("no {} version found in package.json", self.id()));
+        }
         let contents = file::read_to_string(path)?;
         Ok(contents.trim().to_string())
     }
