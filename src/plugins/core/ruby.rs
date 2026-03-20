@@ -732,11 +732,12 @@ impl RubyPlugin {
         ctx.pr
             .set_message("verify GitHub artifact attestations".to_string());
 
+        let token = env::github_api_token().await;
         match sigstore_verification::verify_github_attestation(
             tarball_path,
             owner,
             repo,
-            env::GITHUB_TOKEN.as_deref(),
+            token.as_deref(),
             None, // Accept any workflow from repo
         )
         .await

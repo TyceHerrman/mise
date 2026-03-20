@@ -11,6 +11,7 @@ use log::LevelFilter;
 pub use std::env::*;
 use std::sync::LazyLock as Lazy;
 use std::sync::RwLock;
+use tokio::sync::OnceCell;
 use std::{
     collections::{HashMap, HashSet},
     ffi::OsStr,
@@ -629,6 +630,39 @@ fn get_token(keys: &[&str]) -> Option<String> {
         .and_then(|v| if v.trim().is_empty() { None } else { Some(v) })
 }
 
+static GHTKN_TOKEN: OnceCell<Option<String>> = OnceCell::const_new();
+
+fn github_token_env_is_set() -> bool {
+    ["MISE_GITHUB_TOKEN", "GITHUB_API_TOKEN", "GITHUB_TOKEN"]
+        .iter()
+        .any(|key| var(key).is_ok())
+}
+
+async fn resolve_ghtkn_token() -> Option<String> {
+    if !var_is_true("MISE_GHTKN_ENABLED") {
+        return None;
+    }
+    if github_token_env_is_set() {
+        return None;
+    }
+    let ts = ghtkn::Client::new().token_source(ghtkn::InputGet::default());
+    ts.token_or_none().await
+}
+
+pub async fn github_api_token() -> Option<String> {
+    if let Some(token) = GITHUB_TOKEN.as_ref() {
+        return Some(token.clone());
+    }
+    let ghtkn = GHTKN_TOKEN.get_or_init(resolve_ghtkn_token).await;
+    ghtkn.clone()
+}
+
+/// Sync hint: returns true only when we positively know a GitHub token exists.
+/// Safe to call before or after ghtkn initialization.
+pub fn has_github_api_token_hint() -> bool {
+    GITHUB_TOKEN.is_some() || matches!(GHTKN_TOKEN.get(), Some(Some(_)))
+}
+
 pub fn is_activated() -> bool {
     var("__MISE_DIFF").is_ok()
 }
@@ -735,5 +769,98 @@ mod tests {
         remove_var("MISE_GITHUB_TOKEN");
         remove_var("GITHUB_TOKEN");
         remove_var("GITHUB_API_TOKEN");
+    }
+
+    #[test]
+    fn test_github_token_env_is_set() {
+        remove_var("MISE_GITHUB_TOKEN");
+        remove_var("GITHUB_API_TOKEN");
+        remove_var("GITHUB_TOKEN");
+        assert!(!github_token_env_is_set());
+
+        set_var("MISE_GITHUB_TOKEN", "tok");
+        assert!(github_token_env_is_set());
+        remove_var("MISE_GITHUB_TOKEN");
+
+        set_var("GITHUB_API_TOKEN", "tok");
+        assert!(github_token_env_is_set());
+        remove_var("GITHUB_API_TOKEN");
+
+        set_var("GITHUB_TOKEN", "tok");
+        assert!(github_token_env_is_set());
+        remove_var("GITHUB_TOKEN");
+
+        // Empty var is still "set" — var().is_ok() returns true
+        set_var("GITHUB_TOKEN", "");
+        assert!(github_token_env_is_set());
+        remove_var("GITHUB_TOKEN");
+    }
+
+    #[test]
+    fn test_github_token_env_is_set_vs_get_token_semantic_gap() {
+        remove_var("MISE_GITHUB_TOKEN");
+        remove_var("GITHUB_API_TOKEN");
+        remove_var("GITHUB_TOKEN");
+
+        set_var("MISE_GITHUB_TOKEN", "");
+        set_var("GITHUB_TOKEN", "valid");
+        // env var is set-but-empty so github_token_env_is_set() returns true
+        assert!(github_token_env_is_set());
+        // get_token finds MISE_GITHUB_TOKEN first (empty) and filters to None,
+        // so set-but-empty suppresses ghtkn AND yields no token = unauthenticated
+        assert_eq!(get_token(&["MISE_GITHUB_TOKEN", "GITHUB_TOKEN"]), None);
+
+        remove_var("MISE_GITHUB_TOKEN");
+        remove_var("GITHUB_TOKEN");
+    }
+
+    #[tokio::test]
+    async fn test_resolve_ghtkn_token_disabled_by_default() {
+        remove_var("MISE_GHTKN_ENABLED");
+        remove_var("MISE_GITHUB_TOKEN");
+        remove_var("GITHUB_API_TOKEN");
+        remove_var("GITHUB_TOKEN");
+        // Short-circuits at var_is_true("MISE_GHTKN_ENABLED") — never reaches ghtkn::Client
+        assert_eq!(resolve_ghtkn_token().await, None);
+    }
+
+    #[tokio::test]
+    async fn test_resolve_ghtkn_token_disabled_when_false() {
+        remove_var("MISE_GITHUB_TOKEN");
+        remove_var("GITHUB_API_TOKEN");
+        remove_var("GITHUB_TOKEN");
+        set_var("MISE_GHTKN_ENABLED", "false");
+        assert_eq!(resolve_ghtkn_token().await, None);
+        remove_var("MISE_GHTKN_ENABLED");
+    }
+
+    #[tokio::test]
+    async fn test_resolve_ghtkn_token_suppressed_by_env_token() {
+        remove_var("MISE_GITHUB_TOKEN");
+        remove_var("GITHUB_API_TOKEN");
+        remove_var("GITHUB_TOKEN");
+        set_var("MISE_GHTKN_ENABLED", "true");
+
+        for key in ["GITHUB_TOKEN", "MISE_GITHUB_TOKEN", "GITHUB_API_TOKEN"] {
+            set_var(key, "x");
+            // Short-circuits at github_token_env_is_set() — never reaches ghtkn::Client
+            assert_eq!(resolve_ghtkn_token().await, None);
+            remove_var(key);
+        }
+
+        remove_var("MISE_GHTKN_ENABLED");
+    }
+
+    #[tokio::test]
+    async fn test_resolve_ghtkn_token_suppressed_by_empty_env_token() {
+        remove_var("MISE_GITHUB_TOKEN");
+        remove_var("GITHUB_API_TOKEN");
+        remove_var("GITHUB_TOKEN");
+        set_var("MISE_GHTKN_ENABLED", "true");
+        // Empty env var suppresses ghtkn even though get_token() would also return None
+        set_var("GITHUB_TOKEN", "");
+        assert_eq!(resolve_ghtkn_token().await, None);
+        remove_var("GITHUB_TOKEN");
+        remove_var("MISE_GHTKN_ENABLED");
     }
 }

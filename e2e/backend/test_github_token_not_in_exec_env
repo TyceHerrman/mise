@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+
+# Verify GITHUB_TOKEN is not exported to subprocess env after a
+# GitHub-backed install when no GITHUB_TOKEN env var was set.
+#
+# Scope: this only checks `mise x -- env` output. It does NOT test
+# that a resolved ghtkn token is withheld from backend-specific
+# subprocess forwarding (e.g. cargo-binstall), because ghtkn cannot
+# resolve in CI (no keyring/config). That path is covered by manual
+# testing.
+
+unset GITHUB_TOKEN GITHUB_API_TOKEN MISE_GITHUB_TOKEN
+
+cat <<EOF >mise.toml
+[tools]
+"github:jdx/mise-test-fixtures" = { version = "1.0.0", asset_pattern = "hello-world-1.0.0.tar.gz", bin_path = "hello-world-1.0.0/bin", postinstall = "chmod +x \$MISE_TOOL_INSTALL_PATH/hello-world-1.0.0/bin/hello-world" }
+EOF
+
+mise install
+
+assert_not_contains "mise x -- env" "GITHUB_TOKEN="

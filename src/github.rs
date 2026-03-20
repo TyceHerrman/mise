@@ -141,14 +141,14 @@ pub async fn list_releases_from_url(api_url: &str, repo: &str) -> Result<Vec<Git
 
 async fn list_releases_(api_url: &str, repo: &str) -> Result<Vec<GithubRelease>> {
     let url = format!("{api_url}/repos/{repo}/releases");
-    let headers = get_headers(&url);
+    let headers = get_headers(&url).await;
     let (mut releases, mut headers) = crate::http::HTTP_FETCH
         .json_headers_with_headers::<Vec<GithubRelease>, _>(url, &headers)
         .await?;
 
     if *env::MISE_LIST_ALL_VERSIONS {
         while let Some(next) = next_page(&headers) {
-            headers = get_headers(&next);
+            headers = get_headers(&next).await;
             let (more, h) = crate::http::HTTP_FETCH
                 .json_headers_with_headers::<Vec<GithubRelease>, _>(next, &headers)
                 .await?;
@@ -183,14 +183,14 @@ pub async fn list_tags_from_url(api_url: &str, repo: &str) -> Result<Vec<String>
 
 async fn list_tags_(api_url: &str, repo: &str) -> Result<Vec<String>> {
     let url = format!("{api_url}/repos/{repo}/tags");
-    let headers = get_headers(&url);
+    let headers = get_headers(&url).await;
     let (mut tags, mut headers) = crate::http::HTTP_FETCH
         .json_headers_with_headers::<Vec<GithubTag>, _>(url, &headers)
         .await?;
 
     if *env::MISE_LIST_ALL_VERSIONS {
         while let Some(next) = next_page(&headers) {
-            headers = get_headers(&next);
+            headers = get_headers(&next).await;
             let (more, h) = crate::http::HTTP_FETCH
                 .json_headers_with_headers::<Vec<GithubTag>, _>(next, &headers)
                 .await?;
@@ -210,14 +210,14 @@ pub async fn list_tags_with_dates(repo: &str) -> Result<Vec<GithubTagWithDate>> 
 
 async fn list_tags_with_dates_(api_url: &str, repo: &str) -> Result<Vec<GithubTagWithDate>> {
     let url = format!("{api_url}/repos/{repo}/tags");
-    let headers = get_headers(&url);
+    let headers = get_headers(&url).await;
     let (mut tags, mut response_headers) = crate::http::HTTP_FETCH
         .json_headers_with_headers::<Vec<GithubTag>, _>(url, &headers)
         .await?;
 
     // Fetch all pages when MISE_LIST_ALL_VERSIONS is set
     while let Some(next) = next_page(&response_headers) {
-        response_headers = get_headers(&next);
+        response_headers = get_headers(&next).await;
         let (more, h) = crate::http::HTTP_FETCH
             .json_headers_with_headers::<Vec<GithubTag>, _>(next, &response_headers)
             .await?;
@@ -228,7 +228,7 @@ async fn list_tags_with_dates_(api_url: &str, repo: &str) -> Result<Vec<GithubTa
     // Fetch commit dates in parallel using the parallel utility
     let results = crate::parallel::parallel(tags, |tag| async move {
         let date = if let Some(commit) = tag.commit {
-            let headers = get_headers(&commit.url);
+            let headers = get_headers(&commit.url).await;
             match crate::http::HTTP_FETCH
                 .json_with_headers::<GithubCommit, _>(&commit.url, &headers)
                 .await
@@ -278,7 +278,7 @@ async fn get_release_(api_url: &str, repo: &str, tag: &str) -> Result<GithubRele
     } else {
         format!("{api_url}/repos/{repo}/releases/tags/{tag}")
     };
-    let headers = get_headers(&url);
+    let headers = get_headers(&url).await;
     crate::http::HTTP_FETCH
         .json_with_headers(url, &headers)
         .await
@@ -298,7 +298,7 @@ fn cache_dir() -> PathBuf {
     dirs::CACHE.join("github")
 }
 
-pub fn get_headers<U: IntoUrl>(url: U) -> HeaderMap {
+pub async fn get_headers<U: IntoUrl>(url: U) -> HeaderMap {
     let mut headers = HeaderMap::new();
     let url = url.into_url().unwrap();
     let mut set_headers = |token: &str| {
@@ -313,8 +313,8 @@ pub fn get_headers<U: IntoUrl>(url: U) -> HeaderMap {
     };
 
     if url.host_str() == Some("api.github.com") {
-        if let Some(token) = env::GITHUB_TOKEN.as_ref() {
-            set_headers(token);
+        if let Some(token) = env::github_api_token().await {
+            set_headers(&token);
         }
     } else if let Some(token) = env::MISE_GITHUB_ENTERPRISE_TOKEN
         .as_ref()

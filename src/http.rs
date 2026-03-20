@@ -91,7 +91,7 @@ impl Client {
 
     pub async fn get_async<U: IntoUrl>(&self, url: U) -> Result<Response> {
         let url = url.into_url().unwrap();
-        let headers = github_headers(&url);
+        let headers = github_headers(&url).await;
         self.get_async_with_headers(url, &headers).await
     }
 
@@ -111,7 +111,7 @@ impl Client {
 
     pub async fn head<U: IntoUrl>(&self, url: U) -> Result<Response> {
         let url = url.into_url().unwrap();
-        let headers = github_headers(&url);
+        let headers = github_headers(&url).await;
         self.head_async_with_headers(url, &headers).await
     }
 
@@ -140,7 +140,7 @@ impl Client {
     ) -> Result<String> {
         let mut url = url.into_url().unwrap();
         // Merge GitHub headers with any extra headers provided
-        let mut headers = github_headers(&url);
+        let mut headers = github_headers(&url).await;
         headers.extend(extra_headers.clone());
         let resp = self.get_async_with_headers(url.clone(), &headers).await?;
         let text = resp.text().await?;
@@ -292,7 +292,7 @@ impl Client {
         pr: Option<&dyn SingleReport>,
     ) -> Result<()> {
         let url = url.into_url()?;
-        let headers = github_headers(&url);
+        let headers = github_headers(&url).await;
         self.download_file_with_headers(url, path, &headers, pr)
             .await
     }
@@ -430,10 +430,10 @@ pub fn error_code(e: &Report) -> Option<u16> {
     }
 }
 
-fn github_headers(url: &Url) -> HeaderMap {
+async fn github_headers(url: &Url) -> HeaderMap {
     let mut headers = HeaderMap::new();
     if url.host_str() == Some("api.github.com")
-        && let Some(token) = &*env::GITHUB_TOKEN
+        && let Some(token) = env::github_api_token().await
     {
         headers.insert(
             reqwest::header::AUTHORIZATION,

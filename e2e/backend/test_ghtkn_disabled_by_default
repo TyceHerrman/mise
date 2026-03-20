@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+
+# The e2e harness does not pass MISE_GHTKN_ENABLED (run_test:80-114),
+# so ghtkn is disabled. This command hits github_api_token() via
+# github.rs::list_tags -> get_headers. It should complete without
+# hanging for device flow.
+#
+# If the gating logic broke and triggered device flow, the timeout catches it.
+# The unauthenticated GitHub API rate limit (60/hr) is well within one call.
+
+unset GITHUB_TOKEN GITHUB_API_TOKEN MISE_GITHUB_TOKEN MISE_GHTKN_ENABLED
+
+# Use timeout function from assert.sh directly (not inside assert_succeed,
+# which runs in a bash -c subprocess without the function).
+timeout 10 mise ls-remote github:jqlang/jq >/dev/null 2>&1
+status=$?
+if [[ $status -eq 124 ]]; then
+	fail "mise ls-remote timed out — ghtkn device flow may have been triggered"
+elif [[ $status -ne 0 ]]; then
+	fail "mise ls-remote failed with status $status"
+fi
+ok "[mise ls-remote github:jqlang/jq] completed within timeout"

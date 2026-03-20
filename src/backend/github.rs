@@ -408,10 +408,11 @@ impl UnifiedGitBackend {
             let parts: Vec<&str> = repo.split('/').collect();
             if parts.len() == 2 {
                 let (owner, repo_name) = (parts[0], parts[1]);
+                let token = env::github_api_token().await;
                 match sigstore_verification::sources::github::GitHubSource::new(
                     owner,
                     repo_name,
-                    env::GITHUB_TOKEN.as_deref(),
+                    token.as_deref(),
                 ) {
                     Ok(source) => {
                         use sigstore_verification::AttestationSource;
@@ -560,7 +561,7 @@ impl UnifiedGitBackend {
         } else if self.is_forgejo() {
             forgejo::get_headers(&url)
         } else {
-            github::get_headers(&url)
+            github::get_headers(&url).await
         };
 
         ctx.pr.set_message(format!("download {filename}"));
@@ -1310,12 +1311,13 @@ impl UnifiedGitBackend {
             )));
         }
         let (owner, repo_name) = (parts[0], parts[1]);
+        let token = env::github_api_token().await;
 
         match sigstore_verification::verify_github_attestation(
             file_path,
             owner,
             repo_name,
-            env::GITHUB_TOKEN.as_deref(),
+            token.as_deref(),
             None, // We don't know the expected workflow
         )
         .await

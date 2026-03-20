@@ -115,8 +115,10 @@ impl SelfUpdate {
 
     fn do_update_blocking(&self) -> Result<Status> {
         let mut update = Update::configure();
-        if let Some(token) = &*env::GITHUB_TOKEN {
-            update.auth_token(token);
+        if let Some(token) =
+            tokio::runtime::Handle::current().block_on(env::github_api_token())
+        {
+            update.auth_token(&token);
         }
         #[cfg(windows)]
         let bin_path_in_archive = "mise/bin/mise.exe";

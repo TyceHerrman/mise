@@ -1316,11 +1316,12 @@ impl AquaBackend {
                 .as_ref()
                 .and_then(|att| att.signer_workflow.clone());
 
+            let token = env::github_api_token().await;
             match sigstore_verification::verify_github_attestation(
                 &artifact_path,
                 &pkg.repo_owner,
                 &pkg.repo_name,
-                env::GITHUB_TOKEN.as_deref(),
+                token.as_deref(),
                 signer_workflow.as_deref(),
             )
             .await

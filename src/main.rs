@@ -170,7 +170,7 @@ fn show_github_rate_limit_err(err: &Report) {
         warn!(
             "GitHub API returned a 403 Forbidden error. This likely means you have exceeded the rate limit."
         );
-        if env::GITHUB_TOKEN.is_none() {
+        if !env::has_github_api_token_hint() {
             warn!(indoc!(
                 r#"GITHUB_TOKEN is not set. This means mise is making unauthenticated requests to GitHub which have a lower rate limit.
                    To increase the rate limit, set the GITHUB_TOKEN environment variable to a GitHub personal access token.

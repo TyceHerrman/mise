@@ -103,6 +103,7 @@ sigstore-verification = { version = "0.2", default-features = false }
 fslock = "0.2.1"
 fuzzy-matcher = "0.3"
 gix = { version = "<1", features = ["worktree-mutation"] }
+ghtkn = { git = "https://github.com/TyceHerrman/ghtkn-rust-sdk", rev = "fc4037000ee10c7ccd75d1a8a68e74d101db27e6" }
 glob = "0.3"
 globset = "0.4"
 ignore = { version = "0.4", features = [] }
