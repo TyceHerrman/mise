@@ -87,7 +87,8 @@ impl SelfUpdate {
             }
             bail!("mise is installed via a package manager, cannot update");
         }
-        let status = self.do_update()?;
+        let token = env::github_api_token().await;
+        let status = self.do_update(token.as_deref())?;
 
         if status.updated() {
             let version = status.version().to_string();
@@ -107,18 +108,16 @@ impl SelfUpdate {
         Ok(())
     }
 
-    fn do_update(&self) -> Result<Status> {
+    fn do_update(&self, token: Option<&str>) -> Result<Status> {
         // Use block_in_place to allow self_update's blocking HTTP calls
         // to work within mise's async runtime
-        tokio::task::block_in_place(|| self.do_update_blocking())
+        tokio::task::block_in_place(|| self.do_update_blocking(token))
     }
 
-    fn do_update_blocking(&self) -> Result<Status> {
+    fn do_update_blocking(&self, token: Option<&str>) -> Result<Status> {
         let mut update = Update::configure();
-        if let Some(token) =
-            tokio::runtime::Handle::current().block_on(env::github_api_token())
-        {
-            update.auth_token(&token);
+        if let Some(token) = token {
+            update.auth_token(token);
         }
         #[cfg(windows)]
         let bin_path_in_archive = "mise/bin/mise.exe";

@@ -342,8 +342,8 @@ pub static PATH_NON_PRISTINE: Lazy<Vec<PathBuf>> = Lazy::new(|| match var(&*PATH
 });
 pub static DIRENV_DIFF: Lazy<Option<String>> = Lazy::new(|| var("DIRENV_DIFF").ok());
 
-pub static GITHUB_TOKEN: Lazy<Option<String>> =
-    Lazy::new(|| get_token(&["MISE_GITHUB_TOKEN", "GITHUB_API_TOKEN", "GITHUB_TOKEN"]));
+const GITHUB_TOKEN_KEYS: &[&str] = &["MISE_GITHUB_TOKEN", "GITHUB_API_TOKEN", "GITHUB_TOKEN"];
+pub static GITHUB_TOKEN: Lazy<Option<String>> = Lazy::new(|| get_token(GITHUB_TOKEN_KEYS));
 pub static MISE_GITHUB_ENTERPRISE_TOKEN: Lazy<Option<String>> =
     Lazy::new(|| get_token(&["MISE_GITHUB_ENTERPRISE_TOKEN"]));
 pub static GITLAB_TOKEN: Lazy<Option<String>> =
@@ -633,9 +633,7 @@ fn get_token(keys: &[&str]) -> Option<String> {
 static GHTKN_TOKEN: OnceCell<Option<String>> = OnceCell::const_new();
 
 fn github_token_env_is_set() -> bool {
-    ["MISE_GITHUB_TOKEN", "GITHUB_API_TOKEN", "GITHUB_TOKEN"]
-        .iter()
-        .any(|key| var(key).is_ok())
+    GITHUB_TOKEN_KEYS.iter().any(|key| var(key).is_ok())
 }
 
 async fn resolve_ghtkn_token() -> Option<String> {
