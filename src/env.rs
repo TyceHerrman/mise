@@ -637,12 +637,13 @@ fn github_token_env_is_set() -> bool {
 }
 
 async fn resolve_ghtkn_token() -> Option<String> {
-    if !var_is_true("MISE_GHTKN_ENABLED") {
+    if !crate::config::Settings::get().github.ghtkn {
         return None;
     }
     if github_token_env_is_set() {
         return None;
     }
+    debug!("ghtkn: attempting token resolution");
     let ts = ghtkn::Client::new().token_source(ghtkn::InputGet::default());
     ts.token_or_none().await
 }
@@ -713,9 +714,13 @@ pub fn set_current_dir<P: AsRef<Path>>(path: P) -> Result<()> {
 mod tests {
     use pretty_assertions::assert_eq;
 
-    use crate::config::Config;
+    use crate::config::{Config, Settings};
 
     use super::*;
+
+    // Mutex to ensure ghtkn tests don't interfere with each other when modifying
+    // global settings via env vars + Settings::reset
+    static TEST_SETTINGS_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     #[tokio::test]
     async fn test_apply_patches() {
@@ -814,30 +819,38 @@ mod tests {
 
     #[tokio::test]
     async fn test_resolve_ghtkn_token_disabled_by_default() {
-        remove_var("MISE_GHTKN_ENABLED");
+        let _guard = TEST_SETTINGS_LOCK.lock().unwrap();
+        remove_var("MISE_GITHUB_GHTKN");
         remove_var("MISE_GITHUB_TOKEN");
         remove_var("GITHUB_API_TOKEN");
         remove_var("GITHUB_TOKEN");
-        // Short-circuits at var_is_true("MISE_GHTKN_ENABLED") — never reaches ghtkn::Client
+        Settings::reset(None);
+        // Short-circuits at Settings::get().github.ghtkn — never reaches ghtkn::Client
         assert_eq!(resolve_ghtkn_token().await, None);
+        Settings::reset(None);
     }
 
     #[tokio::test]
     async fn test_resolve_ghtkn_token_disabled_when_false() {
+        let _guard = TEST_SETTINGS_LOCK.lock().unwrap();
         remove_var("MISE_GITHUB_TOKEN");
         remove_var("GITHUB_API_TOKEN");
         remove_var("GITHUB_TOKEN");
-        set_var("MISE_GHTKN_ENABLED", "false");
+        set_var("MISE_GITHUB_GHTKN", "false");
+        Settings::reset(None);
         assert_eq!(resolve_ghtkn_token().await, None);
-        remove_var("MISE_GHTKN_ENABLED");
+        remove_var("MISE_GITHUB_GHTKN");
+        Settings::reset(None);
     }
 
     #[tokio::test]
     async fn test_resolve_ghtkn_token_suppressed_by_env_token() {
+        let _guard = TEST_SETTINGS_LOCK.lock().unwrap();
         remove_var("MISE_GITHUB_TOKEN");
         remove_var("GITHUB_API_TOKEN");
         remove_var("GITHUB_TOKEN");
-        set_var("MISE_GHTKN_ENABLED", "true");
+        set_var("MISE_GITHUB_GHTKN", "true");
+        Settings::reset(None);
 
         for key in ["GITHUB_TOKEN", "MISE_GITHUB_TOKEN", "GITHUB_API_TOKEN"] {
             set_var(key, "x");
@@ -846,19 +859,36 @@ mod tests {
             remove_var(key);
         }
 
-        remove_var("MISE_GHTKN_ENABLED");
+        remove_var("MISE_GITHUB_GHTKN");
+        Settings::reset(None);
     }
 
     #[tokio::test]
     async fn test_resolve_ghtkn_token_suppressed_by_empty_env_token() {
+        let _guard = TEST_SETTINGS_LOCK.lock().unwrap();
         remove_var("MISE_GITHUB_TOKEN");
         remove_var("GITHUB_API_TOKEN");
         remove_var("GITHUB_TOKEN");
-        set_var("MISE_GHTKN_ENABLED", "true");
+        set_var("MISE_GITHUB_GHTKN", "true");
+        Settings::reset(None);
         // Empty env var suppresses ghtkn even though get_token() would also return None
         set_var("GITHUB_TOKEN", "");
         assert_eq!(resolve_ghtkn_token().await, None);
         remove_var("GITHUB_TOKEN");
-        remove_var("MISE_GHTKN_ENABLED");
+        remove_var("MISE_GITHUB_GHTKN");
+        Settings::reset(None);
+    }
+
+    #[test]
+    fn test_github_ghtkn_setting_wiring() {
+        let _guard = TEST_SETTINGS_LOCK.lock().unwrap();
+        remove_var("MISE_GITHUB_GHTKN");
+        Settings::reset(None);
+        assert!(!Settings::get().github.ghtkn);
+        set_var("MISE_GITHUB_GHTKN", "true");
+        Settings::reset(None);
+        assert!(Settings::get().github.ghtkn);
+        remove_var("MISE_GITHUB_GHTKN");
+        Settings::reset(None);
     }
 }

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-# The e2e harness does not pass MISE_GHTKN_ENABLED (run_test:80-114),
+# The e2e harness does not pass MISE_GITHUB_GHTKN (run_test:80-114),
 # so ghtkn is disabled. This command hits github_api_token() via
 # github.rs::list_tags -> get_headers. It should complete without
 # hanging for device flow.
@@ -8,7 +8,7 @@
 # If the gating logic broke and triggered device flow, the timeout catches it.
 # The unauthenticated GitHub API rate limit (60/hr) is well within one call.
 
-unset GITHUB_TOKEN GITHUB_API_TOKEN MISE_GITHUB_TOKEN MISE_GHTKN_ENABLED
+unset GITHUB_TOKEN GITHUB_API_TOKEN MISE_GITHUB_TOKEN MISE_GITHUB_GHTKN
 
 # Use timeout function from assert.sh directly (not inside assert_succeed,
 # which runs in a bash -c subprocess without the function).

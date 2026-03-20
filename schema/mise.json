@@ -739,6 +739,11 @@
           "type": "object",
           "additionalProperties": false,
           "properties": {
+            "ghtkn": {
+              "default": false,
+              "description": "Enable automatic GitHub token management via ghtkn.",
+              "type": "boolean"
+            },
             "github_attestations": {
               "default": true,
               "description": "Enable GitHub Artifact Attestations verification for github backend tools.",

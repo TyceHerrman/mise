@@ -250,6 +250,16 @@ export MISE_GITHUB_ENTERPRISE_TOKEN="your-token"
 - **GitHub shorthand for latest release version:** `github:cli/cli`
 - **GitHub shorthand for specific release version:** `github:cli/cli@2.40.1`
 
+## Automatic Token Management (ghtkn)
+
+When `github.ghtkn` is enabled in settings (or `MISE_GITHUB_GHTKN=true` is set), mise will
+attempt to obtain a GitHub token via the [ghtkn](https://github.com/ghtkn/ghtkn) SDK if no
+`MISE_GITHUB_TOKEN`, `GITHUB_API_TOKEN`, or `GITHUB_TOKEN` environment variable is set.
+
+This requires a working ghtkn configuration (`ghtkn.yaml`) with at least one GitHub App
+registered. See the [ghtkn documentation](https://github.com/ghtkn/ghtkn) for setup instructions.
+If ghtkn is unavailable or misconfigured, mise falls back to unauthenticated API access.
+
 ## Settings
 
 <script setup>
