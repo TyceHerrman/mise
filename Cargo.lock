@@ -3205,7 +3205,8 @@ dependencies = [
 [[package]]
 name = "ghtkn"
 version = "0.1.0"
-source = "git+https://github.com/TyceHerrman/ghtkn-rust-sdk?rev=fc4037000ee10c7ccd75d1a8a68e74d101db27e6#fc4037000ee10c7ccd75d1a8a68e74d101db27e6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "42c063b303755e5d4589e133a6aba3fb2cf3c2f5af34236fe09f88170f78c61f"
 dependencies = [
  "chrono",
  "keyring",
