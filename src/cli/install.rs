@@ -7,11 +7,15 @@ use crate::config::Config;
 use crate::config::Settings;
 use crate::duration::parse_into_timestamp;
 use crate::hooks::Hooks;
-use crate::toolset::{InstallOptions, ResolveOptions, ToolRequest, ToolSource, Toolset};
+use crate::toolset::{
+    InstallOptions, ResolveOptions, ToolRequest, ToolSource, Toolset, tool_env_vars,
+};
 use crate::{config, env, exit, hooks};
+use clap::ValueHint;
 use eyre::Result;
 use itertools::Itertools;
 use jiff::Timestamp;
+use std::path::PathBuf;
 
 /// Install a tool version
 ///
@@ -65,6 +69,20 @@ pub struct Install {
     /// Sets --jobs=1
     #[clap(long, overrides_with = "jobs")]
     raw: bool,
+
+    /// [experimental] Install tool(s) to a shared directory
+    ///
+    /// Installs to the specified directory instead of the default install location.
+    /// May require elevated permissions depending on the path.
+    #[clap(long, verbatim_doc_comment, value_hint = ValueHint::DirPath, conflicts_with = "system")]
+    shared: Option<PathBuf>,
+
+    /// [experimental] Install tool(s) to the system-wide shared directory
+    ///
+    /// Installs to /usr/local/share/mise/installs (or MISE_SYSTEM_DATA_DIR/installs).
+    /// May require elevated permissions (e.g. sudo).
+    #[clap(long, verbatim_doc_comment, conflicts_with = "shared")]
+    system: bool,
 }
 
 impl Install {
@@ -131,15 +149,22 @@ impl Install {
             .iter()
             .map(|ta| ta.ba.short.clone())
             .collect();
-        // Collect inactive tool names before trs borrow is consumed
-        let inactive_tools: Vec<String> = expanded_runtimes
+        // Collect set of tools that appear in any config file or in a
+        // MISE_<TOOL>_VERSION env var. We can't use trs.sources here because
+        // load_runtime_args overrides the underlying source with
+        // ToolSource::Argument whenever the user passes TOOL@VERSION, so config-
+        // and env-sourced tools become indistinguishable from CLI-only ones.
+        let configured_tools: HashSet<String> = config
+            .config_files
+            .values()
+            .filter_map(|cf| cf.to_tool_request_set().ok())
+            .flat_map(|cf_trs| cf_trs.tools.into_keys().map(|ba| ba.short.clone()))
+            .chain(tool_env_vars().map(|(name, _, _)| name))
+            .collect();
+        let inactive_tools: Vec<String> = tools
             .iter()
-            .filter(|ta| {
-                trs.sources
-                    .get(ta.ba.as_ref())
-                    .is_none_or(|s| s.is_argument())
-            })
-            .map(|ta| ta.ba.short.clone())
+            .filter(|t| !configured_tools.contains(*t))
+            .cloned()
             .collect();
         let mut ts: Toolset = trs.filter_by_tool(tools).into();
         let tool_versions = self.get_requested_tool_versions(&ts, &expanded_runtimes)?;
@@ -203,6 +228,11 @@ impl Install {
     }
 
     fn install_opts(&self) -> Result<InstallOptions> {
+        let install_dir = if self.system {
+            Some(env::MISE_SYSTEM_INSTALLS_DIR.clone())
+        } else {
+            self.shared.clone()
+        };
         Ok(InstallOptions {
             force: self.force,
             jobs: self.jobs,
@@ -212,19 +242,21 @@ impl Install {
                 use_locked_version: true,
                 latest_versions: true,
                 before_date: self.get_before_date()?,
+                offline: false,
+                refresh_remote_versions: false,
+                inactive: false,
             },
             dry_run: self.is_dry_run(),
             locked: Settings::get().locked,
+            install_dir,
             ..Default::default()
         })
     }
 
-    /// Get the before_date from CLI flag or settings
+    /// Get the before_date from the CLI --before flag only.
+    /// Per-tool and global setting fallbacks are handled in ToolRequest::resolve.
     fn get_before_date(&self) -> Result<Option<Timestamp>> {
         if let Some(before) = &self.before {
-            return Ok(Some(parse_into_timestamp(before)?));
-        }
-        if let Some(before) = &Settings::get().install_before {
             return Ok(Some(parse_into_timestamp(before)?));
         }
         Ok(None)

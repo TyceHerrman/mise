@@ -9,18 +9,18 @@ use itertools::Itertools;
 use xx::regex;
 
 use crate::backend::platform_target::PlatformTarget;
-use crate::backend::{Backend, VersionInfo};
+use crate::backend::{Backend, VersionInfo, normalize_idiomatic_contents, strict_metadata};
 use crate::cli::args::BackendArg;
 use crate::cmd::CmdLineRunner;
 use crate::config::{Config, Settings};
 use crate::duration::DAILY;
-use crate::env::{self, PATH_KEY};
+use crate::env::PATH_KEY;
 use crate::git::{CloneOptions, Git};
 use crate::github::{self, GithubRelease};
 use crate::http::{HTTP, HTTP_FETCH};
 use crate::install_context::InstallContext;
 use crate::lock_file::LockFile;
-use crate::lockfile::PlatformInfo;
+use crate::lockfile::{PlatformInfo, ProvenanceType};
 use crate::plugins::PluginSource;
 use crate::toolset::{ToolRequest, ToolVersion, Toolset};
 use crate::ui::progress_report::SingleReport;
@@ -28,7 +28,7 @@ use crate::{file, hash, plugins, timeout};
 
 const RUBY_INDEX_URL: &str = "https://cache.ruby-lang.org/pub/ruby/index.txt";
 const ATTESTATION_HELP: &str = "To disable attestation verification, set MISE_RUBY_GITHUB_ATTESTATIONS=false\n\
-    or add `ruby.github_attestations = false` to your mise config";
+    or add `ruby.github_attestations = false` under [settings] in mise.toml";
 
 #[derive(Debug)]
 pub struct RubyPlugin {
@@ -386,6 +386,31 @@ impl RubyPlugin {
 
     // ===== Precompiled Ruby support =====
 
+    /// Detect provenance type for precompiled Ruby binaries.
+    /// Records GithubAttestations based on settings and URL format without an API probe.
+    /// This assumes all releases from the configured precompiled source have attestations;
+    /// if a release lacks them, install will fail at verification time.
+    fn detect_precompiled_provenance(&self) -> Option<ProvenanceType> {
+        let settings = Settings::get();
+        let enabled = settings
+            .ruby
+            .github_attestations
+            .unwrap_or(settings.github_attestations);
+        if !enabled {
+            return None;
+        }
+        let source = &settings.ruby.precompiled_url;
+        // Custom URL templates aren't verified via GitHub attestation API
+        if source.contains("://") {
+            return None;
+        }
+        // Must be a valid owner/repo format for GitHub attestation verification
+        if !source.contains('/') {
+            return None;
+        }
+        Some(ProvenanceType::GithubAttestations)
+    }
+
     /// Check if precompiled binaries should be tried
     /// Precompiled if: explicit opt-in (compile=false), or experimental + not opted out
     /// TODO(2026.8.0): make precompiled the default when compile is unset, remove this debug_assert
@@ -475,6 +500,37 @@ impl RubyPlugin {
         }
     }
 
+    /// Extract the build revision tag from existing lock_platforms URLs.
+    ///
+    /// URLs look like: `.../releases/download/3.3.11-1/ruby-3.3.11...`
+    /// This extracts "3.3.11-1" when the version is "3.3.11".
+    fn extract_build_revision_from_lock_platforms(
+        tv: &ToolVersion,
+        version: &str,
+    ) -> Option<String> {
+        for pi in tv.lock_platforms.values() {
+            if let Some(url) = &pi.url {
+                // Match `/download/{tag}/` in GitHub release URLs
+                let prefix = "/releases/download/";
+                if let Some(start) = url.find(prefix) {
+                    let after = &url[start + prefix.len()..];
+                    if let Some(end) = after.find('/') {
+                        let tag = &after[..end];
+                        // Check if this is a build revision of the version
+                        if tag != version
+                            && tag.starts_with(&format!("{version}-"))
+                            && let Some(suffix) = tag.strip_prefix(&format!("{version}-"))
+                            && suffix.parse::<u32>().is_ok()
+                        {
+                            return Some(tag.to_string());
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
     /// Find precompiled asset from a GitHub repo's releases.
     /// On Linux with glibc < 2.35, prefers the no-YJIT variant (.no_yjit.) which
     /// targets glibc 2.17. Falls back to the standard build if no variant is found.
@@ -484,8 +540,39 @@ impl RubyPlugin {
         version: &str,
         platform: &str,
         prefer_no_yjit: bool,
+        locked_build_revision: Option<&str>,
     ) -> Result<Option<(String, Option<String>)>> {
-        let releases = github::list_releases(repo).await?;
+        let release = if let Some(tag) = locked_build_revision {
+            // Use the exact build revision from the lockfile
+            debug!("using locked build revision {tag} for ruby {version}");
+            match github::get_release(repo, tag).await {
+                Ok(r) => r,
+                Err(err) => {
+                    debug!("locked build revision {tag} not found, finding latest: {err}");
+                    match github::get_release_with_build_revision(repo, version).await {
+                        Ok(r) => r,
+                        Err(err) => {
+                            debug!("no precompiled ruby found for {version}: {err}");
+                            return Ok(None);
+                        }
+                    }
+                }
+            }
+        } else {
+            match github::get_release_with_build_revision(repo, version).await {
+                Ok(r) => r,
+                Err(err) => {
+                    debug!("no precompiled ruby found for {version}: {err}");
+                    return Ok(None);
+                }
+            }
+        };
+        if release.tag_name != version {
+            debug!(
+                "using build revision {} for ruby {version}",
+                release.tag_name
+            );
+        }
         let standard_name = format!("ruby-{}.{}.tar.gz", version, platform);
         let no_yjit_name = format!("ruby-{}.{}.no_yjit.tar.gz", version, platform);
 
@@ -496,18 +583,11 @@ impl RubyPlugin {
         let mut standard_asset = None;
         let mut no_yjit_asset = None;
 
-        for release in &releases {
-            for asset in &release.assets {
-                if no_yjit_asset.is_none() && asset.name == no_yjit_name {
-                    no_yjit_asset =
-                        Some((asset.browser_download_url.clone(), asset.digest.clone()));
-                } else if standard_asset.is_none() && asset.name == standard_name {
-                    standard_asset =
-                        Some((asset.browser_download_url.clone(), asset.digest.clone()));
-                }
-            }
-            if no_yjit_asset.is_some() && standard_asset.is_some() {
-                break;
+        for asset in &release.assets {
+            if no_yjit_asset.is_none() && asset.name == no_yjit_name {
+                no_yjit_asset = Some((asset.browser_download_url.clone(), asset.digest.clone()));
+            } else if standard_asset.is_none() && asset.name == standard_name {
+                standard_asset = Some((asset.browser_download_url.clone(), asset.digest.clone()));
             }
         }
 
@@ -526,6 +606,7 @@ impl RubyPlugin {
         version: &str,
         platform: &str,
         prefer_no_yjit: bool,
+        locked_build_revision: Option<&str>,
     ) -> Result<Option<(String, Option<String>)>> {
         let settings = Settings::get();
         let source = &settings.ruby.precompiled_url;
@@ -538,8 +619,14 @@ impl RubyPlugin {
             )))
         } else {
             // GitHub repo shorthand (default: "jdx/ruby")
-            self.find_precompiled_asset_in_repo(source, version, platform, prefer_no_yjit)
-                .await
+            self.find_precompiled_asset_in_repo(
+                source,
+                version,
+                platform,
+                prefer_no_yjit,
+                locked_build_revision,
+            )
+            .await
         }
     }
 
@@ -564,7 +651,7 @@ impl RubyPlugin {
     }
 
     /// Fetch created_at timestamps for Ruby versions from GitHub releases
-    async fn fetch_ruby_release_dates(&self) -> HashMap<String, String> {
+    async fn fetch_ruby_release_dates(&self) -> Result<HashMap<String, String>> {
         let mut dates = HashMap::new();
         match github::list_releases("ruby/ruby").await {
             Ok(releases) => {
@@ -575,10 +662,13 @@ impl RubyPlugin {
                 }
             }
             Err(err) => {
+                if strict_metadata() {
+                    return Err(err).wrap_err("failed to fetch Ruby release metadata");
+                }
                 debug!("Failed to fetch Ruby release dates: {err}");
             }
         }
-        dates
+        Ok(dates)
     }
 
     /// Try to install from precompiled binary
@@ -586,14 +676,21 @@ impl RubyPlugin {
     async fn install_precompiled(
         &self,
         ctx: &InstallContext,
-        tv: &ToolVersion,
+        tv: &mut ToolVersion,
     ) -> Result<Option<ToolVersion>> {
         let Some(platform) = self.precompiled_platform() else {
             return Ok(None);
         };
 
+        let locked_build_revision =
+            Self::extract_build_revision_from_lock_platforms(tv, &tv.version);
         let Some((url, checksum)) = self
-            .resolve_precompiled_url(&tv.version, &platform, Self::needs_no_yjit())
+            .resolve_precompiled_url(
+                &tv.version,
+                &platform,
+                Self::needs_no_yjit(),
+                locked_build_revision.as_deref(),
+            )
             .await?
         else {
             return Ok(None);
@@ -614,9 +711,42 @@ impl RubyPlugin {
             hash::ensure_checksum(&tarball_path, hash_str, Some(ctx.pr.as_ref()), "sha256")?;
         }
 
-        // Verify GitHub attestations for precompiled binaries
-        self.verify_github_attestations(ctx, &tarball_path, &tv.version)
+        // Check lockfile provenance expectation before verification
+        let platform_key = PlatformTarget::from_current().to_key();
+        let locked_provenance = tv
+            .lock_platforms
+            .get_mut(&platform_key)
+            .and_then(|pi| pi.provenance.take());
+
+        // Verify GitHub artifact attestations for precompiled binaries
+        // Returns Ok(true) if verified, Ok(false) if skipped, Err if failed
+        let verified = self
+            .verify_github_artifact_attestations(ctx, &tarball_path, &tv.version)
             .await?;
+
+        // Record provenance only if verification actually succeeded (not skipped)
+        if verified {
+            let pi = tv.lock_platforms.entry(platform_key.clone()).or_default();
+            pi.provenance = Some(ProvenanceType::GithubAttestations);
+        }
+
+        // Enforce lockfile provenance
+        if let Some(ref expected) = locked_provenance {
+            let got = tv
+                .lock_platforms
+                .get(&platform_key)
+                .and_then(|pi| pi.provenance.as_ref());
+            if !got.is_some_and(|g| std::mem::discriminant(g) == std::mem::discriminant(expected)) {
+                let got_str = got
+                    .map(|g| g.to_string())
+                    .unwrap_or_else(|| "no verification".to_string());
+                return Err(eyre!(
+                    "Lockfile requires {expected} provenance for {tv} but {got_str} was used. \
+                     This may indicate a downgrade attack. Enable the corresponding verification setting \
+                     or update the lockfile."
+                ));
+            }
+        }
 
         ctx.pr.set_message(format!("extract {}", filename));
         let install_path = tv.install_path();
@@ -625,10 +755,9 @@ impl RubyPlugin {
             &tarball_path,
             &install_path,
             &file::TarOptions {
-                format: file::TarFormat::TarGz,
                 strip_components: 1,
                 pr: Some(ctx.pr.as_ref()),
-                ..Default::default()
+                ..file::TarOptions::new(file::TarFormat::TarGz)
             },
         )?;
 
@@ -636,14 +765,15 @@ impl RubyPlugin {
     }
 
     /// Verify GitHub artifact attestations for precompiled Ruby binary
-    /// Returns Ok(()) if verification succeeds or is skipped (attestations unavailable)
+    /// Returns Ok(true) if verification succeeds
+    /// Returns Ok(false) if verification was skipped (disabled or not applicable)
     /// Returns Err if verification is enabled and fails
-    async fn verify_github_attestations(
+    async fn verify_github_artifact_attestations(
         &self,
         ctx: &InstallContext,
         tarball_path: &std::path::Path,
         version: &str,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         let settings = Settings::get();
 
         // Check Ruby-specific setting, fall back to global
@@ -652,54 +782,55 @@ impl RubyPlugin {
             .github_attestations
             .unwrap_or(settings.github_attestations);
         if !enabled {
-            debug!("GitHub attestations verification disabled for Ruby");
-            return Ok(());
+            debug!("GitHub artifact attestations verification disabled for Ruby");
+            return Ok(false);
         }
 
         let source = &settings.ruby.precompiled_url;
 
         // Skip for custom URL templates (not GitHub repos)
         if source.contains("://") {
-            debug!("Skipping attestation verification for custom URL template");
-            return Ok(());
+            debug!("Skipping GitHub artifact attestation verification for custom URL template");
+            return Ok(false);
         }
 
         let (owner, repo) = match source.split_once('/') {
             Some((o, r)) => (o, r),
             None => {
                 warn!("Invalid precompiled_url format: {}", source);
-                return Ok(());
+                return Ok(false);
             }
         };
 
-        ctx.pr.set_message("verify GitHub attestations".to_string());
+        ctx.pr
+            .set_message("verify GitHub artifact attestations".to_string());
 
-        match sigstore_verification::verify_github_attestation(
+        match crate::github::sigstore::verify_attestation(
             tarball_path,
             owner,
             repo,
-            env::GITHUB_TOKEN.as_deref(),
             None, // Accept any workflow from repo
+            None,
         )
         .await
         {
             Ok(true) => {
                 ctx.pr
-                    .set_message("✓ GitHub attestations verified".to_string());
+                    .set_message("✓ GitHub artifact attestations verified".to_string());
                 debug!(
-                    "GitHub attestations verified successfully for ruby@{}",
+                    "GitHub artifact attestations verified successfully for ruby@{}",
                     version
                 );
-                Ok(())
+                Ok(true)
             }
             Ok(false) => Err(eyre!(
-                "GitHub attestations verification failed for ruby@{version}\n{ATTESTATION_HELP}"
+                "GitHub artifact attestations verification failed for ruby@{version}\n{ATTESTATION_HELP}"
             )),
-            Err(sigstore_verification::AttestationError::NoAttestations) => Err(eyre!(
-                "No GitHub attestations found for ruby@{version}\n{ATTESTATION_HELP}"
+            Err(crate::github::sigstore::AttestationError::NoAttestations) => Err(eyre!(
+                "No GitHub artifact attestations found for ruby@{version}\n{ATTESTATION_HELP}"
             )),
             Err(e) => Err(eyre!(
-                "GitHub attestations verification failed for ruby@{version}: {e}\n{ATTESTATION_HELP}"
+                "GitHub artifact attestations verification failed for ruby@{version}: {e}\n{ATTESTATION_HELP}"
             )),
         }
     }
@@ -719,7 +850,7 @@ impl Backend for RubyPlugin {
             algorithm: Some("sha256".to_string()),
         }];
 
-        // Report GitHub attestations if enabled for precompiled binaries
+        // Report GitHub artifact attestations if enabled for precompiled binaries
         let github_attestations_enabled = settings
             .ruby
             .github_attestations
@@ -741,18 +872,21 @@ impl Backend for RubyPlugin {
                 }
 
                 // Fetch Ruby release dates from GitHub in parallel with version list
-                let release_dates = self.fetch_ruby_release_dates().await;
+                let release_dates = self.fetch_ruby_release_dates().await?;
 
                 let ruby_build_bin = self.ruby_build_bin();
-                let versions = plugins::core::run_fetch_task_with_timeout(move || {
-                    let output = cmd!(ruby_build_bin, "--definitions").read()?;
-                    let versions: Vec<String> = output
-                        .split('\n')
-                        .sorted_by_cached_key(|s| regex!(r#"^\d"#).is_match(s)) // show matz ruby first
-                        .map(|s| s.to_string())
-                        .collect();
-                    Ok(versions)
-                })?;
+                let ruby_build_str = ruby_build_bin.to_string_lossy().to_string();
+                let output = crate::cmd::cmd_read_async_inherited_env(
+                    &ruby_build_str,
+                    &["--definitions"],
+                    std::iter::empty::<(&str, &std::ffi::OsStr)>(),
+                )
+                .await?;
+                let versions: Vec<String> = output
+                    .split('\n')
+                    .sorted_by_cached_key(|s| regex!(r#"^\d"#).is_match(s)) // show matz ruby first
+                    .map(|s| s.to_string())
+                    .collect();
 
                 // Map versions to VersionInfo with created_at timestamps
                 let version_infos = versions
@@ -774,26 +908,30 @@ impl Backend for RubyPlugin {
         .await
     }
 
-    async fn idiomatic_filenames(&self) -> Result<Vec<String>> {
+    async fn _idiomatic_filenames(&self) -> Result<Vec<String>> {
         Ok(vec![".ruby-version".into(), "Gemfile".into()])
     }
 
-    async fn parse_idiomatic_file(&self, path: &Path) -> Result<String> {
+    async fn _parse_idiomatic_file(&self, path: &Path) -> Result<Vec<String>> {
         let v = match path.file_name() {
             Some(name) if name == "Gemfile" => parse_gemfile(&file::read_to_string(path)?),
             _ => {
                 // .ruby-version
-                let body = file::read_to_string(path)?;
+                let body = normalize_idiomatic_contents(&file::read_to_string(path)?);
                 body.trim()
                     .trim_start_matches("ruby-")
                     .trim_start_matches('v')
                     .to_string()
             }
         };
-        Ok(v)
+        if v.is_empty() {
+            return Ok(vec![]);
+        }
+        Ok(vec![v])
     }
 
     async fn install_version_(&self, ctx: &InstallContext, tv: ToolVersion) -> Result<ToolVersion> {
+        let mut tv = tv;
         let settings = Settings::get();
         if settings.ruby.compile.is_none() && !settings.experimental {
             warn_once!(
@@ -805,13 +943,13 @@ impl Backend for RubyPlugin {
 
         // Try precompiled if compile=false or experimental + not opted out
         if self.should_try_precompiled()
-            && let Some(installed_tv) = self.install_precompiled(ctx, &tv).await?
+            && let Some(installed_tv) = self.install_precompiled(ctx, &mut tv).await?
         {
             hint!(
                 "ruby_precompiled",
                 "installing precompiled ruby from jdx/ruby\n\
                     if you experience issues, switch to ruby-build by running",
-                "mise settings ruby.compile=1"
+                "mise settings ruby.compile=true"
             );
             self.install_rubygems_hook(&installed_tv)?;
             if let Err(err) = self
@@ -882,19 +1020,33 @@ impl Backend for RubyPlugin {
         tv: &ToolVersion,
         target: &PlatformTarget,
     ) -> Result<PlatformInfo> {
+        // Windows uses RubyInstaller2 binaries, not source tarballs
+        if target.os_name() == "windows" {
+            return super::ruby_common::resolve_rubyinstaller_lock_info(&tv.version).await;
+        }
+
         // Precompiled binary info if enabled
         if self.should_try_precompiled()
             && let Some(platform) = self.precompiled_platform_for_target(target)
-            && let Some((url, checksum)) = self
-                .resolve_precompiled_url(&tv.version, &platform, false)
+            && let Some((url, checksum)) = {
+                let locked_build_revision =
+                    Self::extract_build_revision_from_lock_platforms(tv, &tv.version);
+                self.resolve_precompiled_url(
+                    &tv.version,
+                    &platform,
+                    false,
+                    locked_build_revision.as_deref(),
+                )
                 .await?
+            }
         {
+            // Detect provenance for precompiled binaries
+            let provenance = self.detect_precompiled_provenance();
             return Ok(PlatformInfo {
                 url: Some(url),
                 checksum,
-                size: None,
-                url_api: None,
-                conda_deps: None,
+                provenance,
+                ..Default::default()
             });
         }
 
@@ -906,6 +1058,7 @@ impl Backend for RubyPlugin {
                 size: None,
                 url_api: None,
                 conda_deps: None,
+                ..Default::default()
             }),
             None => Ok(PlatformInfo::default()),
         }

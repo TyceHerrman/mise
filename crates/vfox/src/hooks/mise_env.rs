@@ -10,6 +10,7 @@ use crate::hooks::env_keys::EnvKey;
 pub struct MiseEnvContext<T: serde::Serialize> {
     pub args: Vec<String>,
     pub options: T,
+    pub config_root: Option<String>,
 }
 
 /// Result from a mise_env hook call
@@ -24,6 +25,9 @@ pub struct MiseEnvResult {
     pub cacheable: bool,
     /// Files to watch for cache invalidation
     pub watch_files: Vec<PathBuf>,
+    /// Whether the plugin wants its env vars to be redacted
+    /// When true, mise will redact these values unless the user explicitly opts out
+    pub redact: bool,
 }
 
 impl Plugin {
@@ -47,6 +51,7 @@ impl<T: serde::Serialize> IntoLua for MiseEnvContext<T> {
     fn into_lua(self, lua: &Lua) -> mlua::Result<Value> {
         let table = lua.create_table()?;
         table.set("options", lua.to_value(&self.options)?)?;
+        table.set("config_root", self.config_root)?;
         Ok(Value::Table(table))
     }
 }
@@ -56,12 +61,13 @@ impl FromLua for MiseEnvResult {
         match value {
             // Extended format: { cacheable = true, watch_files = {...}, env = {...} }
             Value::Table(table) => {
-                // Check if this is extended format by looking for 'env' or 'cacheable' key
+                // Check if this is extended format by looking for known keys
                 let has_env = table.contains_key("env")?;
                 let has_cacheable = table.contains_key("cacheable")?;
                 let has_watch_files = table.contains_key("watch_files")?;
+                let has_redact = table.contains_key("redact")?;
 
-                if has_env || has_cacheable || has_watch_files {
+                if has_env || has_cacheable || has_watch_files || has_redact {
                     // Extended format
                     let env: Vec<EnvKey> = table
                         .get::<Option<Vec<EnvKey>>>("env")
@@ -87,11 +93,20 @@ impl FromLua for MiseEnvResult {
                             ))
                         })?
                         .unwrap_or_default();
+                    let redact: bool = table
+                        .get::<Option<bool>>("redact")
+                        .map_err(|e| {
+                            LuaError::RuntimeError(format!(
+                                "Invalid 'redact' field in MiseEnv result: expected boolean. Error: {e}"
+                            ))
+                        })?
+                        .unwrap_or(false);
 
                     Ok(MiseEnvResult {
                         env,
                         cacheable,
                         watch_files: watch_files.into_iter().map(PathBuf::from).collect(),
+                        redact,
                     })
                 } else {
                     // Legacy format: table is actually an array of env keys
@@ -108,6 +123,7 @@ impl FromLua for MiseEnvResult {
                         env,
                         cacheable: false,
                         watch_files: vec![],
+                        redact: false,
                     })
                 }
             }

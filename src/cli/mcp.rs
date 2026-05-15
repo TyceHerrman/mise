@@ -3,15 +3,18 @@ use crate::config::Config;
 use clap::Parser;
 use rmcp::{
     RoleServer, ServiceExt,
-    handler::server::ServerHandler,
+    handler::server::{ServerHandler, tool::ToolRouter, wrapper::Parameters},
     model::{
-        AnnotateAble, CallToolRequestParam, CallToolResult, Content, ErrorCode, ErrorData,
-        Implementation, ListResourcesResult, ListToolsResult, PaginatedRequestParam,
-        ProtocolVersion, RawResource, ReadResourceRequestParam, ReadResourceResult,
-        ResourceContents, ServerCapabilities, ServerInfo,
+        AnnotateAble, CallToolRequestParams, CallToolResult, Content, ErrorCode, ErrorData,
+        ListResourcesResult, ListToolsResult, PaginatedRequestParams, ProtocolVersion, RawResource,
+        ReadResourceRequestParams, ReadResourceResult, ResourceContents, ServerCapabilities,
+        ServerInfo,
     },
+    schemars::JsonSchema,
     service::RequestContext,
+    tool, tool_router,
 };
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -26,12 +29,17 @@ use std::collections::HashMap;
 /// - Task definitions and execution
 /// - Environment variables
 /// - Configuration information
+/// - Task execution via the run_task tool
 ///
 /// Resources available:
 /// - mise://tools - List all tools (use ?include_inactive=true to include inactive tools)
 /// - mise://tasks - List all tasks with their configurations
 /// - mise://env - List all environment variables
 /// - mise://config - Show configuration files and project root
+///
+/// Tools available:
+/// - install_tool - Install a tool with an optional version (not yet implemented)
+/// - run_task - Execute a mise task with optional arguments
 ///
 /// Note: This is primarily intended for integration with AI assistants like Claude,
 /// Cursor, or other tools that support the Model Context Protocol.
@@ -40,30 +48,140 @@ use std::collections::HashMap;
 pub struct Mcp {}
 
 #[derive(Clone)]
-struct MiseServer {}
+struct MiseServer {
+    tool_router: ToolRouter<Self>,
+}
 
+/// Parameters for installing a tool
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
+struct InstallToolParams {
+    /// Tool name (e.g. "node", "python", "go")
+    tool: String,
+    /// Optional version to install (e.g. "20", "3.12"). Defaults to latest.
+    #[serde(default)]
+    version: Option<String>,
+}
+
+/// Parameters for running a mise task
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
+struct RunTaskParams {
+    /// Name of the task to run
+    task: String,
+    /// Optional arguments to pass to the task
+    #[serde(default)]
+    args: Vec<String>,
+}
+
+#[tool_router]
 impl MiseServer {
     fn new() -> Self {
-        Self {}
+        Self {
+            tool_router: Self::tool_router(),
+        }
+    }
+
+    /// Install a tool with an optional version
+    #[tool(description = "Install a tool with an optional version (e.g. node@20, python@3.12)")]
+    async fn install_tool(
+        &self,
+        Parameters(_params): Parameters<InstallToolParams>,
+    ) -> std::result::Result<CallToolResult, ErrorData> {
+        Ok(CallToolResult::error(vec![Content::text(
+            "Tool installation not yet implemented",
+        )]))
+    }
+
+    /// Execute a mise task with optional arguments
+    #[tool(description = "Execute a mise task with optional arguments")]
+    async fn run_task(
+        &self,
+        Parameters(RunTaskParams { task, args }): Parameters<RunTaskParams>,
+    ) -> std::result::Result<CallToolResult, ErrorData> {
+        let exe = std::env::current_exe().map_err(|e| ErrorData {
+            code: ErrorCode::INTERNAL_ERROR,
+            message: Cow::Owned(format!("Failed to get current exe: {e}")),
+            data: None,
+        })?;
+
+        let mut cmd_args = vec!["run".to_string(), task.clone()];
+        if !args.is_empty() {
+            cmd_args.push("--".to_string());
+            cmd_args.extend(args);
+        }
+
+        let child = tokio::process::Command::new(exe)
+            .args(&cmd_args)
+            .env("NO_COLOR", "1")
+            .env("MISE_YES", "1")
+            .kill_on_drop(true)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .map_err(|e| ErrorData {
+                code: ErrorCode::INTERNAL_ERROR,
+                message: Cow::Owned(format!("Failed to spawn mise run: {e}")),
+                data: None,
+            })?;
+
+        let output = match crate::config::Settings::get().task_timeout_duration() {
+            Some(timeout) => tokio::time::timeout(timeout, child.wait_with_output())
+                .await
+                .map_err(|_| ErrorData {
+                    code: ErrorCode::INTERNAL_ERROR,
+                    message: Cow::Owned(format!("Task '{task}' timed out after {timeout:?}")),
+                    data: None,
+                })?,
+            None => child.wait_with_output().await,
+        }
+        .map_err(|e| ErrorData {
+            code: ErrorCode::INTERNAL_ERROR,
+            message: Cow::Owned(format!("Failed to execute mise run: {e}")),
+            data: None,
+        })?;
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+
+        if output.status.success() {
+            let text = match (stderr.is_empty(), stdout.is_empty()) {
+                (true, true) => format!("Task '{task}' completed successfully"),
+                (true, false) => stdout.into_owned(),
+                (false, true) => stderr.into_owned(),
+                (false, false) => format!("{stderr}\n{stdout}"),
+            };
+            Ok(CallToolResult::success(vec![Content::text(text)]))
+        } else {
+            let text = match (stderr.is_empty(), stdout.is_empty()) {
+                (true, true) => format!("Task '{task}' failed with no output"),
+                (false, true) => stderr.into_owned(),
+                (true, false) => stdout.into_owned(),
+                (false, false) => format!("{stderr}\n{stdout}"),
+            };
+            Ok(CallToolResult::error(vec![Content::text(format!(
+                "Task '{task}' failed with exit code {}:\n{text}",
+                output.status.code().unwrap_or(1),
+            ))]))
+        }
     }
 }
 
 impl ServerHandler for MiseServer {
     fn get_info(&self) -> ServerInfo {
-        ServerInfo {
-            protocol_version: ProtocolVersion::V_2025_03_26,
-            capabilities: ServerCapabilities::builder()
-                .enable_resources()
-                .enable_tools()
-                .build(),
-            server_info: Implementation::from_build_env(),
-            instructions: Some("Mise MCP server provides access to tools, tasks, environment variables, and configuration".to_string()),
-        }
+        let capabilities = ServerCapabilities::builder()
+            .enable_resources()
+            .enable_tools()
+            .build();
+        ServerInfo::new(capabilities)
+            .with_protocol_version(ProtocolVersion::V_2025_03_26)
+            .with_instructions("Mise MCP server provides access to tools, tasks, environment variables, and configuration")
     }
 
     async fn list_resources(
         &self,
-        _pagination: Option<PaginatedRequestParam>,
+        _pagination: Option<PaginatedRequestParams>,
         _context: RequestContext<RoleServer>,
     ) -> std::result::Result<ListResourcesResult, ErrorData> {
         let resources = vec![
@@ -73,21 +191,18 @@ impl ServerHandler for MiseServer {
             RawResource::new("mise://config", "Configuration".to_string()).no_annotation(),
         ];
 
-        Ok(ListResourcesResult {
-            resources,
-            next_cursor: None,
-        })
+        Ok(ListResourcesResult::with_all_items(resources))
     }
 
     async fn read_resource(
         &self,
-        params: ReadResourceRequestParam,
+        params: ReadResourceRequestParams,
         _context: RequestContext<RoleServer>,
     ) -> std::result::Result<ReadResourceResult, ErrorData> {
         // Parse URI to extract query parameters
         // Example: mise://tools?include_inactive=true
         let url = url::Url::parse(&params.uri).map_err(|e| ErrorData {
-            code: ErrorCode(400),
+            code: ErrorCode::INVALID_REQUEST,
             message: Cow::Owned(format!("Invalid URI: {e}")),
             data: None,
         })?;
@@ -104,7 +219,7 @@ impl ServerHandler for MiseServer {
                 // By default only shows active tools (those in current .mise.toml)
                 // With ?include_inactive=true, shows all installed tools
                 let config = Config::get().await.map_err(|e| ErrorData {
-                    code: ErrorCode(500),
+                    code: ErrorCode::INTERNAL_ERROR,
                     message: Cow::Owned(format!("Failed to load config: {e}")),
                     data: None,
                 })?;
@@ -114,7 +229,7 @@ impl ServerHandler for MiseServer {
                     .get_tool_request_set()
                     .await
                     .map_err(|e| ErrorData {
-                        code: ErrorCode(500),
+                        code: ErrorCode::INTERNAL_ERROR,
                         message: Cow::Owned(format!("Failed to get tool request set: {e}")),
                         data: None,
                     })?
@@ -122,7 +237,7 @@ impl ServerHandler for MiseServer {
 
                 let mut ts = crate::toolset::Toolset::from(trs);
                 ts.resolve(&config).await.map_err(|e| ErrorData {
-                    code: ErrorCode(500),
+                    code: ErrorCode::INTERNAL_ERROR,
                     message: Cow::Owned(format!("Failed to resolve toolset: {e}")),
                     data: None,
                 })?;
@@ -138,7 +253,7 @@ impl ServerHandler for MiseServer {
                 let versions = if include_inactive {
                     // Include all versions (active + installed)
                     ts.list_all_versions(&config).await.map_err(|e| ErrorData {
-                        code: ErrorCode(500),
+                        code: ErrorCode::INTERNAL_ERROR,
                         message: Cow::Owned(format!("Failed to list tool versions: {e}")),
                         data: None,
                     })?
@@ -173,19 +288,20 @@ impl ServerHandler for MiseServer {
                     uri: params.uri.clone(),
                     mime_type: Some("application/json".to_string()),
                     text,
+                    meta: None,
                 }];
 
-                Ok(ReadResourceResult { contents })
+                Ok(ReadResourceResult::new(contents))
             }
             ("mise", Some("tasks")) => {
                 let config = Config::get().await.map_err(|e| ErrorData {
-                    code: ErrorCode(500),
+                    code: ErrorCode::INTERNAL_ERROR,
                     message: Cow::Owned(format!("Failed to load config: {e}")),
                     data: None,
                 })?;
 
                 let tasks = config.tasks().await.map_err(|e| ErrorData {
-                    code: ErrorCode(500),
+                    code: ErrorCode::INTERNAL_ERROR,
                     message: Cow::Owned(format!("Failed to load tasks: {e}")),
                     data: None,
                 })?;
@@ -203,6 +319,7 @@ impl ServerHandler for MiseServer {
                         "dir": task.dir.clone(),
                         "hide": task.hide,
                         "raw": task.raw,
+                        "interactive": task.interactive,
                         "sources": task.sources.clone(),
                         "outputs": task.outputs.clone(),
                         "shell": task.shell.clone(),
@@ -219,19 +336,20 @@ impl ServerHandler for MiseServer {
                     uri: params.uri.clone(),
                     mime_type: Some("application/json".to_string()),
                     text,
+                    meta: None,
                 }];
 
-                Ok(ReadResourceResult { contents })
+                Ok(ReadResourceResult::new(contents))
             }
             ("mise", Some("env")) => {
                 let config = Config::get().await.map_err(|e| ErrorData {
-                    code: ErrorCode(500),
+                    code: ErrorCode::INTERNAL_ERROR,
                     message: Cow::Owned(format!("Failed to load config: {e}")),
                     data: None,
                 })?;
 
                 let env_template = config.env().await.map_err(|e| ErrorData {
-                    code: ErrorCode(500),
+                    code: ErrorCode::INTERNAL_ERROR,
                     message: Cow::Owned(format!("Failed to load env: {e}")),
                     data: None,
                 })?;
@@ -246,13 +364,14 @@ impl ServerHandler for MiseServer {
                     uri: params.uri.clone(),
                     mime_type: Some("application/json".to_string()),
                     text,
+                    meta: None,
                 }];
 
-                Ok(ReadResourceResult { contents })
+                Ok(ReadResourceResult::new(contents))
             }
             ("mise", Some("config")) => {
                 let config = Config::get().await.map_err(|e| ErrorData {
-                    code: ErrorCode(500),
+                    code: ErrorCode::INTERNAL_ERROR,
                     message: Cow::Owned(format!("Failed to load config: {e}")),
                     data: None,
                 })?;
@@ -267,12 +386,13 @@ impl ServerHandler for MiseServer {
                     uri: params.uri.clone(),
                     mime_type: Some("application/json".to_string()),
                     text,
+                    meta: None,
                 }];
 
-                Ok(ReadResourceResult { contents })
+                Ok(ReadResourceResult::new(contents))
             }
             _ => Err(ErrorData {
-                code: ErrorCode(404),
+                code: ErrorCode::RESOURCE_NOT_FOUND,
                 message: Cow::Owned(format!("Unknown resource URI: {}", params.uri)),
                 data: None,
             }),
@@ -281,34 +401,20 @@ impl ServerHandler for MiseServer {
 
     async fn list_tools(
         &self,
-        _pagination: Option<PaginatedRequestParam>,
+        _pagination: Option<PaginatedRequestParams>,
         _context: RequestContext<RoleServer>,
     ) -> std::result::Result<ListToolsResult, ErrorData> {
-        // For now, return empty tools list
-        Ok(ListToolsResult {
-            tools: vec![],
-            next_cursor: None,
-        })
+        Ok(ListToolsResult::with_all_items(self.tool_router.list_all()))
     }
 
     async fn call_tool(
         &self,
-        request: CallToolRequestParam,
-        _context: RequestContext<RoleServer>,
+        request: CallToolRequestParams,
+        context: RequestContext<RoleServer>,
     ) -> std::result::Result<CallToolResult, ErrorData> {
-        match &request.name[..] {
-            "install_tool" => Ok(CallToolResult::success(vec![Content::text(
-                "Tool installation not yet implemented".to_string(),
-            )])),
-            "run_task" => Ok(CallToolResult::success(vec![Content::text(
-                "Task execution not yet implemented".to_string(),
-            )])),
-            _ => Err(ErrorData {
-                code: ErrorCode(404),
-                message: Cow::Owned(format!("Unknown tool: {}", request.name)),
-                data: None,
-            }),
-        }
+        let tool_call_context =
+            rmcp::handler::server::tool::ToolCallContext::new(self, request, context);
+        self.tool_router.call(tool_call_context).await
     }
 }
 
@@ -348,7 +454,10 @@ static AFTER_LONG_HELP: &str = color_print::cstr!(
       "mcpServers": {
         "mise": {
           "command": "mise",
-          "args": ["mcp"]
+          "args": ["mcp"],
+          "env": {
+            "MISE_EXPERIMENTAL": "1"
+          }
         }
       }
     }
@@ -362,5 +471,10 @@ static AFTER_LONG_HELP: &str = color_print::cstr!(
     - <bold>mise://tasks</bold> - List all tasks
     - <bold>mise://env</bold> - List environment variables
     - <bold>mise://config</bold> - Show configuration info
+
+    # Tools available:
+    - <bold>install_tool</bold> - Install a tool (not yet implemented)
+    - <bold>run_task</bold> - Execute a mise task with optional arguments
+      Example: {"task": "build", "args": ["--verbose"]}
 "#
 );

@@ -72,7 +72,16 @@ impl HookEnv {
             config.watch_files().await?
         };
 
-        if !self.force && hook_env::should_exit_early(watch_files.clone(), self.reason) {
+        // For the slow-path check, include watch_files from the previous session to detect
+        // changes to files from tools=true plugins (not yet available via config.watch_files()).
+        // We use a separate variable to ensure deleted watch_files don't persist indefinitely.
+        let slow_path_watch_files: BTreeSet<WatchFilePattern> = watch_files
+            .iter()
+            .cloned()
+            .chain(PREV_SESSION.watch_files.iter().map(|p| p.as_path().into()))
+            .collect();
+
+        if !self.force && hook_env::should_exit_early(slow_path_watch_files, self.reason) {
             trace!("should_exit_early true");
             return Ok(());
         }
@@ -81,7 +90,8 @@ impl HookEnv {
         miseprint!("{}", hook_env::clear_old_env(&*shell))?;
 
         // Use env_with_path_and_split which handles caching internally
-        let (mut mise_env, user_paths, tool_paths) = ts.env_with_path_and_split(&config).await?;
+        let (mut mise_env, user_paths, tool_paths, env_watch_files) =
+            ts.env_with_path_and_split(&config).await?;
         mise_env.remove(&*PATH_KEY);
 
         // Create config_paths from user_paths for display_status and build_session
@@ -117,6 +127,16 @@ impl HookEnv {
             .map(|(k, (v, _))| (k.clone(), v.clone()))
             .collect();
 
+        // Include env watch_files in the session for the next prompt's fast-path check.
+        // On cache miss, env_watch_files contains only plugin-returned watch_files.
+        // On cache hit, it contains the full CachedEnv.watch_files set (config files,
+        // env_files, env_scripts, mise.lock files, and plugin watch_files). The BTreeSet
+        // deduplicates any overlap with the config-level watch_files above.
+        let watch_files: BTreeSet<WatchFilePattern> = watch_files
+            .into_iter()
+            .chain(env_watch_files.iter().map(|p| p.as_path().into()))
+            .collect();
+
         patches.extend(self.build_path_operations(&user_paths, &tool_paths, &__MISE_DIFF.path)?);
         patches.push(self.build_diff_operation(&diff)?);
         patches.push(
@@ -148,6 +168,7 @@ impl HookEnv {
         miseprint!("{alias_output}")?;
 
         hooks::run_all_hooks(&config, ts, &*shell).await;
+        hooks::run_enter_hooks_for_newly_loaded_configs(&config, ts, &*shell).await;
         watch_files::execute_runs(&config, ts).await;
 
         Ok(())
@@ -214,7 +235,7 @@ impl HookEnv {
             }
         }
         ts.notify_if_versions_missing(config).await;
-        crate::prepare::notify_if_stale(config);
+        crate::deps::notify_if_stale(config);
         Ok(())
     }
 
@@ -244,12 +265,20 @@ impl HookEnv {
                 // (after the original PATH entries) to preserve their intended position.
                 // This prevents paths appended after `mise activate` in shell rc from
                 // being moved to the front of PATH.
+                //
+                // Also collect orig paths in their current order to preserve any
+                // reordering done after activation (e.g., by ~/.zlogin which runs
+                // after ~/.zshrc where mise activate is typically placed).
                 let mut pre = Vec::new();
                 let mut post_user = Vec::new();
+                let mut orig_reordered = Vec::new();
                 let mut seen_orig = false;
+                let mut seen_in_current: HashSet<&PathBuf> = HashSet::new();
                 for path in &current_paths {
                     if orig_set.contains(path) {
                         seen_orig = true;
+                        orig_reordered.push(path.clone());
+                        seen_in_current.insert(path);
                         continue;
                     }
 
@@ -266,8 +295,15 @@ impl HookEnv {
                     }
                 }
 
-                // Use the original PATH directly as "post" to ensure it's preserved exactly
-                (pre, orig_paths, post_user)
+                // Append any orig paths that are no longer in current PATH
+                // (to avoid losing paths that may have been temporarily removed)
+                for path in &orig_paths {
+                    if !seen_in_current.contains(path) {
+                        orig_reordered.push(path.clone());
+                    }
+                }
+
+                (pre, orig_reordered, post_user)
             }
             _ => (vec![], current_paths, vec![]),
         };
@@ -390,20 +426,34 @@ impl HookEnv {
         installs: &[PathBuf],
         to_remove: &[PathBuf],
     ) -> Result<Option<EnvDiffOperation>> {
-        let mut diff = DirenvDiff::parse(input)?;
+        let mut diff = DirenvDiff::parse(input)
+            .inspect_err(|err| debug!("Failed to parse diff, error: '{:?}'", err))?;
         if diff.new_path().is_empty() {
             return Ok(None);
         }
         for path in to_remove {
-            diff.remove_path_from_old_and_new(path)?;
+            diff.remove_path_from_old_and_new(path).inspect_err(|err| {
+                debug!(
+                    "Failed to remove path from diff: '{:?}' path: '{}'",
+                    err,
+                    path.display()
+                )
+            })?;
         }
         for install in installs {
-            diff.add_path_to_old_and_new(install)?;
+            diff.add_path_to_old_and_new(install).inspect_err(|err| {
+                debug!(
+                    "Failed to add path to diff: '{:?}' path: '{}'",
+                    err,
+                    install.display()
+                )
+            })?;
         }
 
         Ok(Some(EnvDiffOperation::Change(
             "DIRENV_DIFF".into(),
-            diff.dump()?,
+            diff.dump()
+                .inspect_err(|err| debug!("Failed to dump diff: '{:?}'", err))?,
         )))
     }
 

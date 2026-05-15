@@ -30,7 +30,7 @@ pub struct Plugins {
     pub core: bool,
 
     /// Show the git url for each plugin
-    /// e.g.: https://github.com/asdf-vm/asdf-nodejs.git
+    /// e.g.: https://github.com/mise-plugins/vfox-cmake.git
     #[clap(short, long, alias = "url", verbatim_doc_comment)]
     pub urls: bool,
 
@@ -79,6 +79,7 @@ impl Plugins {
             refs: self.refs,
             urls: self.urls,
             user: self.user,
+            outdated: false,
         }));
 
         cmd.run(&config).await

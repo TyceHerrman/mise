@@ -1,8 +1,7 @@
 # Environments
 
-> Like [direnv](https://github.com/direnv/direnv) it
-> manages _environment variables_ for
-> different project directories.
+> Load the right _environment variables_ automatically for each project
+> directory.
 
 Use mise to specify environment variables used for different projects.
 
@@ -46,14 +45,14 @@ Environment variables are available when using [`mise x|exec`](/cli/exec.html), 
 
 ```shell
 mise set MY_VAR=123
-mise exec -- echo $MY_VAR
+mise exec -- bash -c 'echo $MY_VAR'
 # 123
 ```
 
 You can of course combine them with [tools](/dev-tools/):
 
 ```sh
-mise use node@24
+mise use node@26
 mise set MY_VAR=123
 cat mise.toml
 # [tools]
@@ -81,7 +80,7 @@ If you are using [`shims`](/dev-tools/shims.html), the environment variables wil
 
 ```shell
 mise set NODE_ENV=production
-mise use node@24
+mise use node@26
 # using the absolute path for the example
 ~/.local/share/mise/shims/node --eval 'console.log(process.env.NODE_ENV)'
 ```
@@ -153,8 +152,29 @@ mise env --values
 mise env --redacted --values
 ```
 
+::: warning
+Redactions work by intercepting task output line-by-line, so they require a non-`raw` output mode.
+Tasks with `raw = true` bypass this interception (stdout/stderr are passed directly to the terminal), so redactions cannot be applied.
+
+By default, `mise run` uses the `replacing` output mode which shows a progress spinner rather than full output.
+In CI environments, you may want to use `prefix` or `interleave` output instead so you can see full task logs
+while still having redactions applied:
+
+```bash
+MISE_TASK_OUTPUT=prefix mise run mytask
+```
+
+Or set it globally in your config:
+
+```toml
+[settings]
+task.output = "prefix"
+```
+
+:::
+
 ::: danger
-Because mise may output sensitive values that could show up in CI logs you'll need to be configure your CI setup
+Because mise may output sensitive values that could show up in CI logs you'll need to configure your CI setup
 to know which values are sensitive.
 
 For example, when using GitHub Actions, you should use `::add-mask::` to prevent secrets from appearing in logs:
@@ -294,6 +314,11 @@ TOML table for the configuration of these directives.
 
 In `mise.toml`: `env._.file` can be used to specify a [dotenv](https://dotenv.org) file to load.
 
+::: warning
+Top-level `env_file`, `dotenv`, and `env_path` are deprecated. Use `env._.file` and
+`env._.path` instead. These keys will be removed in mise 2027.4.0.
+:::
+
 ```toml
 [env]
 _.file = '.env'
@@ -336,8 +361,8 @@ _.file = [
 ]
 ```
 
-You can set [`MISE_ENV_FILE=.env`](/configuration#mise-env-file) to automatically load dotenv files in any
-directory.
+The legacy [`MISE_ENV_FILE=.env`](/configuration#mise-env-file) setting can also load dotenv
+files automatically, but it is deprecated. Use `env._.file` in a config file instead.
 
 See [secrets](/environments/secrets/) for ways to read encrypted files with `env._.file`.
 

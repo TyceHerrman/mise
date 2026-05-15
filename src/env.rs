@@ -112,8 +112,11 @@ pub static MISE_STATE_DIR: Lazy<PathBuf> =
     Lazy::new(|| var_path("MISE_STATE_DIR").unwrap_or_else(|| XDG_STATE_HOME.join("mise")));
 pub static MISE_TMP_DIR: Lazy<PathBuf> =
     Lazy::new(|| var_path("MISE_TMP_DIR").unwrap_or_else(|| temp_dir().join("mise")));
-pub static MISE_SYSTEM_DIR: Lazy<PathBuf> =
-    Lazy::new(|| var_path("MISE_SYSTEM_DIR").unwrap_or_else(|| PathBuf::from("/etc/mise")));
+pub static MISE_SYSTEM_CONFIG_DIR: Lazy<PathBuf> = Lazy::new(|| {
+    var_path("MISE_SYSTEM_CONFIG_DIR")
+        .or_else(|| var_path("MISE_SYSTEM_DIR"))
+        .unwrap_or_else(|| PathBuf::from("/etc/mise"))
+});
 
 // data subdirs
 pub static MISE_INSTALLS_DIR: Lazy<PathBuf> =
@@ -124,6 +127,104 @@ pub static MISE_PLUGINS_DIR: Lazy<PathBuf> =
     Lazy::new(|| var_path("MISE_PLUGINS_DIR").unwrap_or_else(|| MISE_DATA_DIR.join("plugins")));
 pub static MISE_SHIMS_DIR: Lazy<PathBuf> =
     Lazy::new(|| var_path("MISE_SHIMS_DIR").unwrap_or_else(|| MISE_DATA_DIR.join("shims")));
+/// System-level data directory (like MISE_DATA_DIR but for system-wide tools).
+pub static MISE_SYSTEM_DATA_DIR: Lazy<PathBuf> = Lazy::new(|| {
+    var_path("MISE_SYSTEM_DATA_DIR").unwrap_or_else(|| PathBuf::from("/usr/local/share/mise"))
+});
+/// System-level installs directory, derived from MISE_SYSTEM_DATA_DIR.
+pub static MISE_SYSTEM_INSTALLS_DIR: Lazy<PathBuf> =
+    Lazy::new(|| MISE_SYSTEM_DATA_DIR.join("installs"));
+
+/// Extra shared install directories parsed from the environment variable.
+/// This is the early/fallback source; prefer `shared_install_dirs()` which also
+/// reads from Settings (config files) when available.
+static MISE_SHARED_INSTALL_DIRS_ENV: Lazy<Vec<PathBuf>> = Lazy::new(|| {
+    var_os("MISE_SHARED_INSTALL_DIRS")
+        .map(|v| {
+            std::env::split_paths(&v)
+                .filter(|p| !p.as_os_str().is_empty())
+                .map(replace_path)
+                .collect()
+        })
+        .unwrap_or_default()
+});
+
+/// Returns the list of shared install directories to search.
+/// Includes the system installs dir (`MISE_SYSTEM_DATA_DIR/installs`) plus any
+/// user-configured dirs from Settings (config files) or the environment variable.
+/// The user's primary install dir is NOT included here — it is checked separately.
+pub fn shared_install_dirs() -> Vec<PathBuf> {
+    use crate::config::Settings;
+    let user_dirs = if let std::result::Result::Ok(settings) = Settings::try_get()
+        && let Some(ref dirs) = settings.shared_install_dirs
+        && !dirs.is_empty()
+    {
+        dirs.clone()
+    } else {
+        MISE_SHARED_INSTALL_DIRS_ENV.clone()
+    };
+    let system = &*MISE_SYSTEM_INSTALLS_DIR;
+    // System dir first (if it exists and isn't the user's own install dir),
+    // then user-configured dirs.
+    let mut result = Vec::new();
+    if system.is_dir() && *system != *MISE_INSTALLS_DIR {
+        result.push(system.clone());
+    }
+    result.extend(user_dirs);
+    result
+}
+
+/// Early-boot variant used by install_state::init_tools() before Settings is loaded.
+pub fn shared_install_dirs_early() -> Vec<PathBuf> {
+    let system = &*MISE_SYSTEM_INSTALLS_DIR;
+    let mut result = Vec::new();
+    if system.is_dir() && *system != *MISE_INSTALLS_DIR {
+        result.push(system.clone());
+    }
+    result.extend(MISE_SHARED_INSTALL_DIRS_ENV.iter().cloned());
+    result
+}
+
+/// Categorize an install path as system, shared, or local.
+pub fn install_path_category(path: &Path) -> InstallPathCategory {
+    if path.starts_with(&*MISE_SYSTEM_INSTALLS_DIR) {
+        InstallPathCategory::System
+    } else if shared_install_dirs().iter().any(|d| path.starts_with(d)) {
+        InstallPathCategory::Shared
+    } else {
+        InstallPathCategory::Local
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InstallPathCategory {
+    /// Primary user install dir
+    Local,
+    /// System-level (/usr/local/share/mise/installs)
+    System,
+    /// User-configured shared dir
+    Shared,
+}
+
+/// Look up a tool version in shared install directories.
+/// `tool_dir_name` should be the kebab-cased directory name (e.g. from `ba.installs_path`).
+/// Returns the first shared path where `<shared_dir>/<tool_dir_name>/<pathname>` exists,
+/// or `primary_path` if not found in any shared directory.
+pub fn find_in_shared_installs(
+    primary_path: PathBuf,
+    tool_dir_name: &str,
+    pathname: &str,
+) -> PathBuf {
+    if !primary_path.exists() {
+        for shared_dir in shared_install_dirs() {
+            let shared_path = shared_dir.join(tool_dir_name).join(pathname);
+            if shared_path.exists() {
+                return shared_path;
+            }
+        }
+    }
+    primary_path
+}
 
 pub static MISE_DEFAULT_TOOL_VERSIONS_FILENAME: Lazy<String> = Lazy::new(|| {
     var("MISE_DEFAULT_TOOL_VERSIONS_FILENAME")
@@ -143,14 +244,14 @@ pub static MISE_DEFAULT_CONFIG_FILENAME: Lazy<String> = Lazy::new(|| {
 pub static MISE_OVERRIDE_TOOL_VERSIONS_FILENAMES: Lazy<Option<IndexSet<String>>> =
     Lazy::new(|| match var("MISE_OVERRIDE_TOOL_VERSIONS_FILENAMES") {
         Ok(v) if v == "none" => Some([].into()),
-        Ok(v) => Some(v.split(':').map(|s| s.to_string()).collect()),
+        Ok(v) => Some(split_colon_list(&v)),
         Err(_) => {
             miserc::get_override_tool_versions_filenames().map(|v| v.iter().cloned().collect())
         }
     });
 pub static MISE_OVERRIDE_CONFIG_FILENAMES: Lazy<IndexSet<String>> =
     Lazy::new(|| match var("MISE_OVERRIDE_CONFIG_FILENAMES") {
-        Ok(v) => v.split(':').map(|s| s.to_string()).collect(),
+        Ok(v) => split_colon_list(&v),
         Err(_) => miserc::get_override_config_filenames()
             .map(|v| v.iter().cloned().collect())
             .unwrap_or_default(),
@@ -163,12 +264,10 @@ pub static MISE_GLOBAL_CONFIG_ROOT: Lazy<PathBuf> =
 pub static MISE_SYSTEM_CONFIG_FILE: Lazy<Option<PathBuf>> =
     Lazy::new(|| var_path("MISE_SYSTEM_CONFIG_FILE"));
 pub static MISE_IGNORED_CONFIG_PATHS: Lazy<Vec<PathBuf>> = Lazy::new(|| {
-    var("MISE_IGNORED_CONFIG_PATHS")
-        .ok()
+    var_os("MISE_IGNORED_CONFIG_PATHS")
         .map(|v| {
-            v.split(':')
-                .filter(|p| !p.is_empty())
-                .map(PathBuf::from)
+            split_paths(&v)
+                .filter(|p| !p.as_os_str().is_empty())
                 .map(replace_path)
                 .collect()
         })
@@ -179,8 +278,7 @@ pub static MISE_IGNORED_CONFIG_PATHS: Lazy<Vec<PathBuf>> = Lazy::new(|| {
         .unwrap_or_default()
 });
 pub static MISE_CEILING_PATHS: Lazy<HashSet<PathBuf>> = Lazy::new(|| {
-    var("MISE_CEILING_PATHS")
-        .ok()
+    var_os("MISE_CEILING_PATHS")
         .map(|v| {
             split_paths(&v)
                 .filter(|p| !p.as_os_str().is_empty())
@@ -257,6 +355,7 @@ pub static MISE_SELF_UPDATE_DISABLED_PATH: Lazy<Option<PathBuf>> = Lazy::new(|| 
     )
 });
 pub static MISE_LOG_HTTP: Lazy<bool> = Lazy::new(|| var_is_true("MISE_LOG_HTTP"));
+pub static MISE_LOG_VERBOSE_DEPS: Lazy<bool> = Lazy::new(|| var_is_true("MISE_LOG_VERBOSE_DEPS"));
 
 pub static __USAGE: Lazy<Option<String>> = Lazy::new(|| var("__USAGE").ok());
 
@@ -276,13 +375,15 @@ pub static IS_RUNNING_AS_SHIM: Lazy<bool> = Lazy::new(|| {
         return true;
     }
 
-    #[cfg(unix)]
-    let mise_bin = "mise";
-    #[cfg(windows)]
-    let mise_bin = "mise.exe";
     let bin_name = *MISE_BIN_NAME;
-    bin_name != mise_bin && !bin_name.starts_with("mise-")
+    !is_mise_binary(bin_name)
 });
+
+/// Returns true if the given binary name refers to mise itself (not a shim).
+/// Handles "mise", "mise.exe", "mise.bat", "mise.cmd", "mise-doctor", etc.
+pub fn is_mise_binary(bin_name: &str) -> bool {
+    bin_name == "mise" || bin_name.starts_with("mise.") || bin_name.starts_with("mise-")
+}
 
 #[cfg(test)]
 pub static TERM_WIDTH: Lazy<usize> = Lazy::new(|| 80);
@@ -304,6 +405,8 @@ pub static MISE_BIN: Lazy<PathBuf> = Lazy::new(|| {
 });
 pub static MISE_TIMINGS: Lazy<u8> = Lazy::new(|| var_u8("MISE_TIMINGS"));
 pub static MISE_PID: Lazy<String> = Lazy::new(|| process::id().to_string());
+pub static MISE_JOBS: Lazy<Option<usize>> =
+    Lazy::new(|| var("MISE_JOBS").ok().and_then(|v| v.parse::<usize>().ok()));
 pub static __MISE_SCRIPT: Lazy<bool> = Lazy::new(|| var_is_true("__MISE_SCRIPT"));
 pub static __MISE_DIFF: Lazy<EnvDiff> = Lazy::new(get_env_diff);
 pub static __MISE_ORIG_PATH: Lazy<Option<String>> = Lazy::new(|| var("__MISE_ORIG_PATH").ok());
@@ -337,6 +440,17 @@ pub static PATH_NON_PRISTINE: Lazy<Vec<PathBuf>> = Lazy::new(|| match var(&*PATH
 });
 pub static DIRENV_DIFF: Lazy<Option<String>> = Lazy::new(|| var("DIRENV_DIFF").ok());
 
+/// GitHub token resolved from environment variables ONLY
+/// (`MISE_GITHUB_TOKEN`, `GITHUB_API_TOKEN`, `GITHUB_TOKEN`).
+///
+/// Intended for subprocess env-var plumbing — passing a token to child processes such as
+/// `cargo install` or `ruby-build` that read it themselves.
+///
+/// **Do not use for mise's own HTTP or sigstore calls.** Use
+/// [`crate::github::resolve_token_for_api_url`] (which walks env vars,
+/// `credential_command`, `github_tokens.toml`, gh CLI, and git credentials) or the
+/// [`crate::github::sigstore`] wrapper (which calls it internally). Passing this static
+/// to attestation verification is the original cause of the lock-time rate-limit bug.
 pub static GITHUB_TOKEN: Lazy<Option<String>> =
     Lazy::new(|| get_token(&["MISE_GITHUB_TOKEN", "GITHUB_API_TOKEN", "GITHUB_TOKEN"]));
 pub static MISE_GITHUB_ENTERPRISE_TOKEN: Lazy<Option<String>> =
@@ -345,8 +459,6 @@ pub static GITLAB_TOKEN: Lazy<Option<String>> =
     Lazy::new(|| get_token(&["MISE_GITLAB_TOKEN", "GITLAB_TOKEN"]));
 pub static MISE_GITLAB_ENTERPRISE_TOKEN: Lazy<Option<String>> =
     Lazy::new(|| get_token(&["MISE_GITLAB_ENTERPRISE_TOKEN"]));
-pub static FORGEJO_TOKEN: Lazy<Option<String>> =
-    Lazy::new(|| get_token(&["MISE_FORGEJO_TOKEN", "FORGEJO_TOKEN"]));
 pub static MISE_FORGEJO_ENTERPRISE_TOKEN: Lazy<Option<String>> =
     Lazy::new(|| get_token(&["MISE_FORGEJO_ENTERPRISE_TOKEN"]));
 
@@ -359,7 +471,7 @@ pub static CLICOLOR_FORCE: Lazy<Option<bool>> =
 pub static CLICOLOR: Lazy<Option<bool>> = Lazy::new(|| {
     if *CLICOLOR_FORCE == Some(true) {
         Some(true)
-    } else if *NO_COLOR {
+    } else if *NO_COLOR || var_is_false("MISE_COLOR") {
         Some(false)
     } else if let Ok(v) = var("CLICOLOR") {
         Some(v != "0")
@@ -380,63 +492,6 @@ pub static PYENV_ROOT: Lazy<PathBuf> =
 pub static UV_PYTHON_INSTALL_DIR: Lazy<PathBuf> = Lazy::new(|| {
     var_path("UV_PYTHON_INSTALL_DIR").unwrap_or_else(|| XDG_DATA_HOME.join("uv").join("python"))
 });
-
-// node
-pub static MISE_NODE_CONCURRENCY: Lazy<Option<usize>> = Lazy::new(|| {
-    var("MISE_NODE_CONCURRENCY")
-        .ok()
-        .and_then(|v| v.parse::<usize>().ok())
-        .map(|v| v.max(1))
-        .or_else(|| {
-            if *MISE_NODE_NINJA {
-                None
-            } else {
-                Some(num_cpus::get_physical())
-            }
-        })
-});
-pub static MISE_NODE_MAKE: Lazy<String> =
-    Lazy::new(|| var("MISE_NODE_MAKE").unwrap_or_else(|_| "make".into()));
-pub static MISE_NODE_NINJA: Lazy<bool> =
-    Lazy::new(|| var_option_bool("MISE_NODE_NINJA").unwrap_or_else(is_ninja_on_path));
-pub static MISE_NODE_VERIFY: Lazy<bool> = Lazy::new(|| !var_is_false("MISE_NODE_VERIFY"));
-pub static MISE_NODE_CFLAGS: Lazy<Option<String>> =
-    Lazy::new(|| var("MISE_NODE_CFLAGS").or_else(|_| var("NODE_CFLAGS")).ok());
-pub static MISE_NODE_CONFIGURE_OPTS: Lazy<Option<String>> = Lazy::new(|| {
-    var("MISE_NODE_CONFIGURE_OPTS")
-        .or_else(|_| var("NODE_CONFIGURE_OPTS"))
-        .ok()
-});
-pub static MISE_NODE_MAKE_OPTS: Lazy<Option<String>> = Lazy::new(|| {
-    var("MISE_NODE_MAKE_OPTS")
-        .or_else(|_| var("NODE_MAKE_OPTS"))
-        .ok()
-});
-pub static MISE_NODE_MAKE_INSTALL_OPTS: Lazy<Option<String>> = Lazy::new(|| {
-    var("MISE_NODE_MAKE_INSTALL_OPTS")
-        .or_else(|_| var("NODE_MAKE_INSTALL_OPTS"))
-        .ok()
-});
-pub static MISE_JOBS: Lazy<Option<usize>> =
-    Lazy::new(|| var("MISE_JOBS").ok().and_then(|v| v.parse::<usize>().ok()));
-pub static MISE_NODE_DEFAULT_PACKAGES_FILE: Lazy<PathBuf> = Lazy::new(|| {
-    var_path("MISE_NODE_DEFAULT_PACKAGES_FILE").unwrap_or_else(|| {
-        let p = HOME.join(".default-nodejs-packages");
-        if p.exists() {
-            return p;
-        }
-        let p = HOME.join(".default-node-packages");
-        if p.exists() {
-            return p;
-        }
-        HOME.join(".default-npm-packages")
-    })
-});
-pub static MISE_NODE_COREPACK: Lazy<bool> = Lazy::new(|| var_is_true("MISE_NODE_COREPACK"));
-pub static NVM_DIR: Lazy<PathBuf> =
-    Lazy::new(|| var_path("NVM_DIR").unwrap_or_else(|| HOME.join(".nvm")));
-pub static NODENV_ROOT: Lazy<PathBuf> =
-    Lazy::new(|| var_path("NODENV_ROOT").unwrap_or_else(|| HOME.join(".nodenv")));
 
 #[cfg(unix)]
 pub const PATH_ENV_SEP: char = ':';
@@ -478,18 +533,6 @@ fn var_is_false(key: &str) -> bool {
             v == "n" || v == "no" || v == "false" || v == "0" || v == "off"
         }
         Err(_) => false,
-    }
-}
-
-fn var_option_bool(key: &str) -> Option<bool> {
-    match var(key) {
-        Ok(_) if var_is_true(key) => Some(true),
-        Ok(_) if var_is_false(key) => Some(false),
-        Ok(v) => {
-            warn!("Invalid value for env var {}={}", key, v);
-            None
-        }
-        _ => None,
     }
 }
 
@@ -606,41 +649,74 @@ fn environment(args: &[String]) -> Vec<String> {
 
     // Get environment value from args or env vars
     // Precedence: CLI args > env vars > .miserc.toml
-    if *IS_RUNNING_AS_SHIM {
+    let from_args = if *IS_RUNNING_AS_SHIM {
         // When running as shim, ignore command line args and use env vars only
-        None
+        vec![]
     } else {
+        // Subcommands where positional args accept hyphen values, so -E after the
+        // first positional would be a task arg, not a global flag.
+        let run_subcommands: HashSet<&str> = HashSet::from(["run", "r"]);
         // Try to get from command line args first
-        args.windows(2)
-            .take_while(|window| !window.iter().any(|a| a == "--"))
-            .find_map(|window| {
-                if arg_defs.contains(&*window[0]) {
-                    Some(window[1].clone())
-                } else {
-                    None
+        // Handles `--env production`, `--env=production`, `-E production`, `-E=production`,
+        // and `-Eproduction`.
+        let mut values = Vec::new();
+        let mut it = args.iter().take_while(|a| a.as_str() != "--");
+        let mut in_run_subcommand = false;
+        while let Some(arg) = it.next() {
+            if arg.starts_with('-') {
+                if arg_defs.contains(arg.as_str()) {
+                    // Case: `-E production` or `--env production`
+                    if let Some(next) = it.next() {
+                        values.push(next.to_string());
+                    }
+                } else if let Some((prefix, rest)) = arg.split_at_checked(2)
+                    && !rest.starts_with('=')
+                    && arg_defs.contains(prefix)
+                {
+                    // Case: `-Eproduction`
+                    values.push(rest.to_string());
+                } else if let Some((flag, value)) = arg.split_once('=') {
+                    // Case: `-E=production` or `--env=production`
+                    if arg_defs.contains(flag) {
+                        values.push(value.to_string());
+                    }
                 }
-            })
-    }
-    .map(|s| {
-        s.split(',')
-            .filter(|s| !s.is_empty())
-            .map(String::from)
-            .collect()
-    })
-    .or_else(|| {
-        var("MISE_ENV")
-            .ok()
-            .or_else(|| var("MISE_PROFILE").ok())
-            .or_else(|| var("MISE_ENVIRONMENT").ok())
-            .map(|s| {
+            } else {
+                // After `run`/`r`, the first positional is the task name — everything
+                // after that belongs to the task, so stop scanning for env flags.
+                if in_run_subcommand {
+                    break;
+                }
+                if run_subcommands.contains(arg.as_str()) {
+                    in_run_subcommand = true;
+                }
+            }
+        }
+        values
+            .into_iter()
+            .flat_map(|s| {
                 s.split(',')
                     .filter(|s| !s.is_empty())
                     .map(String::from)
-                    .collect()
+                    .collect::<Vec<_>>()
             })
-    })
-    .or_else(|| miserc::get_env().cloned())
-    .unwrap_or_default()
+            .collect()
+    };
+    if !from_args.is_empty() {
+        return from_args;
+    }
+    var("MISE_ENV")
+        .ok()
+        .or_else(|| var("MISE_PROFILE").ok())
+        .or_else(|| var("MISE_ENVIRONMENT").ok())
+        .map(|s| {
+            s.split(',')
+                .filter(|s| !s.is_empty())
+                .map(String::from)
+                .collect()
+        })
+        .or_else(|| miserc::get_env().cloned())
+        .unwrap_or_default()
 }
 
 fn log_file_level() -> Option<LevelFilter> {
@@ -682,6 +758,18 @@ fn linux_glibc_version() -> Option<(u32, u32)> {
     None
 }
 
+/// Split a colon-separated string into a set, filtering empty segments.
+/// Empty segments arise from empty strings, leading/trailing colons, or
+/// consecutive colons — all of which should be ignored rather than
+/// injected as empty paths into config discovery.
+fn split_colon_list(value: &str) -> IndexSet<String> {
+    value
+        .split(':')
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .collect()
+}
+
 fn filename(path: &str) -> &str {
     path.rsplit_once(path::MAIN_SEPARATOR_STR)
         .map(|(_, file)| file)
@@ -692,10 +780,6 @@ fn get_token(keys: &[&str]) -> Option<String> {
     keys.iter()
         .find_map(|key| var(key).ok())
         .and_then(|v| if v.trim().is_empty() { None } else { Some(v) })
-}
-
-fn is_ninja_on_path() -> bool {
-    which::which("ninja").is_ok()
 }
 
 pub fn is_activated() -> bool {
@@ -780,6 +864,24 @@ mod tests {
             PathBuf::from("/foo/bar")
         );
         remove_var("MISE_TEST_PATH");
+    }
+
+    #[test]
+    fn test_split_colon_list() {
+        let cases: Vec<(&str, Vec<&str>)> = vec![
+            ("", vec![]),    // empty string — was causing panic
+            (":", vec![]),   // colon only
+            (":::", vec![]), // multiple colons
+            ("mise.toml", vec!["mise.toml"]),
+            ("a:b", vec!["a", "b"]),
+            (":a:b:", vec!["a", "b"]), // leading/trailing colons
+            ("a::b", vec!["a", "b"]),  // consecutive colons
+        ];
+        for (input, expected) in cases {
+            let result = split_colon_list(input);
+            let expected: IndexSet<String> = expected.into_iter().map(|s| s.to_string()).collect();
+            assert_eq!(result, expected, "input: {input:?}");
+        }
     }
 
     #[test]

@@ -2,12 +2,12 @@ use std::sync::Arc;
 
 use crate::backend::pipx::PIPXBackend;
 use crate::cli::args::ToolArg;
-use crate::config::{Config, Settings, config_file};
+use crate::config::{Config, config_file};
 use crate::duration::parse_into_timestamp;
 use crate::file::display_path;
 use crate::toolset::outdated_info::OutdatedInfo;
 use crate::toolset::{
-    InstallOptions, ResolveOptions, ToolVersion, ToolsetBuilder,
+    ConfigScope, InstallOptions, ResolveOptions, ToolSource, ToolVersion, ToolsetBuilder,
     get_versions_needed_by_tracked_configs,
 };
 use crate::ui::multi_progress_report::MultiProgressReport;
@@ -24,7 +24,7 @@ use jiff::Timestamp;
 /// upgrade to the latest 20.x.x version available. See the `--bump` flag to use the latest version
 /// and bump the version in mise.toml.
 ///
-/// This will update mise.lock if it is enabled, see https://mise.jdx.dev/configuration/settings.html#lockfile
+/// This will update mise.lock if it is enabled, see https://mise.en.dev/configuration/settings.html#lockfile
 #[derive(Debug, clap::Args)]
 #[clap(visible_alias = "up", verbatim_doc_comment, after_long_help = AFTER_LONG_HELP)]
 pub struct Upgrade {
@@ -78,6 +78,17 @@ pub struct Upgrade {
     #[clap(long, verbatim_doc_comment)]
     dry_run_code: bool,
 
+    /// Upgrade all tools, including installed-but-inactive tools not present in the current config
+    #[clap(long, verbatim_doc_comment, conflicts_with = "local")]
+    inactive: bool,
+
+    /// Only upgrade tools defined in local config files
+    ///
+    /// This will only upgrade tools that are defined in project-local mise.toml and
+    /// will skip tools defined in the global config (~/.config/mise/config.toml).
+    #[clap(long, verbatim_doc_comment)]
+    local: bool,
+
     /// Directly pipe stdin/stdout/stderr from plugin to user
     /// Sets --jobs=1
     #[clap(long, overrides_with = "jobs")]
@@ -89,10 +100,19 @@ impl Upgrade {
         self.dry_run || self.dry_run_code
     }
 
+    fn scope(&self) -> ConfigScope {
+        if self.local {
+            ConfigScope::LocalOnly
+        } else {
+            ConfigScope::All
+        }
+    }
+
     pub async fn run(self) -> Result<()> {
         let mut config = Config::get().await?;
         let ts = ToolsetBuilder::new()
             .with_args(&self.tool)
+            .with_scope(self.scope())
             .build(&config)
             .await?;
         // Compute before_date once to ensure consistency when using relative durations
@@ -101,6 +121,9 @@ impl Upgrade {
             use_locked_version: false,
             latest_versions: true,
             before_date,
+            offline: false,
+            refresh_remote_versions: false,
+            inactive: self.inactive,
         };
         // Filter tools to check before doing expensive version lookups
         let filter_tools = if !self.interactive && !self.tool.is_empty() {
@@ -144,6 +167,7 @@ impl Upgrade {
         let mpr = MultiProgressReport::get();
         let mut ts = ToolsetBuilder::new()
             .with_args(&self.tool)
+            .with_scope(self.scope())
             .build(config)
             .await?;
 
@@ -202,6 +226,32 @@ impl Upgrade {
                     display_path(cf.get_path())
                 );
             }
+            if !self.bump {
+                use crate::toolset::outdated_info::compute_config_bumps;
+                let tool_versions: Vec<(String, String)> = self
+                    .tool
+                    .iter()
+                    .filter_map(|t| {
+                        t.tvr
+                            .as_ref()
+                            .map(|tvr| (t.ba.short.clone(), tvr.version()))
+                    })
+                    .collect();
+                let refs: Vec<(&str, &str)> = tool_versions
+                    .iter()
+                    .map(|(n, v)| (n.as_str(), v.as_str()))
+                    .collect();
+                let bumps = compute_config_bumps(config, &refs);
+                for bump in &bumps {
+                    miseprintln!(
+                        "Would update {} from {} to {} in {}",
+                        bump.tool_name,
+                        bump.old_version,
+                        bump.new_version,
+                        display_path(&bump.config_path)
+                    );
+                }
+            }
             if self.dry_run_code {
                 exit::exit(1);
             }
@@ -210,14 +260,16 @@ impl Upgrade {
 
         let opts = InstallOptions {
             reason: "upgrade".to_string(),
-            // TODO: can we remove this without breaking e2e/cli/test_upgrade? it may be causing tools to re-install
-            force: true,
+            force: false,
             jobs: self.jobs,
             raw: self.raw,
             resolve_options: ResolveOptions {
                 use_locked_version: false,
                 latest_versions: true,
                 before_date,
+                offline: false,
+                refresh_remote_versions: false,
+                inactive: self.inactive,
             },
             ..Default::default()
         };
@@ -226,7 +278,7 @@ impl Upgrade {
         let tool_requests: Vec<_> = outdated.iter().map(|o| o.tool_request.clone()).collect();
 
         // Install all tools in parallel
-        let (successful_versions, install_error) =
+        let (mut successful_versions, install_error) =
             match ts.install_all_versions(config, tool_requests, &opts).await {
                 Ok(versions) => (versions, eyre::Result::Ok(())),
                 Err(e) => match e.downcast_ref::<crate::errors::Error>() {
@@ -256,6 +308,34 @@ impl Upgrade {
             }
         }
 
+        // When a specific version is provided via CLI (e.g., `mise upgrade tiny@3.0.1`),
+        // update the config file prefix if the new version doesn't match the current specifier.
+        // Skip if --bump was used since it already handles config updates.
+        if !self.bump {
+            use crate::toolset::outdated_info::{apply_config_bumps, compute_config_bumps};
+            let tool_versions: Vec<(String, String)> = self
+                .tool
+                .iter()
+                .filter_map(|t| {
+                    t.tvr.as_ref().and_then(|tvr| {
+                        let name = t.ba.short.clone();
+                        // Only process tools that were successfully installed
+                        if successful_versions.iter().any(|v| v.ba().short == name) {
+                            Some((name, tvr.version()))
+                        } else {
+                            None
+                        }
+                    })
+                })
+                .collect();
+            let refs: Vec<(&str, &str)> = tool_versions
+                .iter()
+                .map(|(n, v)| (n.as_str(), v.as_str()))
+                .collect();
+            let bumps = compute_config_bumps(config, &refs);
+            apply_config_bumps(config, &bumps)?;
+        }
+
         // Reset config after upgrades so tracked configs resolve with new versions
         *config = Config::reset().await?;
 
@@ -267,7 +347,8 @@ impl Upgrade {
 
         // Get versions needed by tracked configs AFTER upgrade
         // This ensures we don't uninstall versions still needed by other projects
-        let versions_needed_by_tracked = get_versions_needed_by_tracked_configs(config).await?;
+        let versions_needed_by_tracked =
+            get_versions_needed_by_tracked_configs(config, false, false).await?;
 
         // Only uninstall old versions of tools that were successfully upgraded
         // and are not needed by any tracked config
@@ -299,7 +380,28 @@ impl Upgrade {
             }
         }
 
+        mpr.finish_progress();
         let ts = config.get_toolset().await?;
+
+        // Fix up sources and requests for lockfile update - CLI args produce
+        // ToolSource::Argument but lockfile update only processes ToolSource::MiseToml.
+        // Also copy the config's request version (e.g., "latest") so the lockfile update
+        // correctly replaces the old entry instead of adding a duplicate.
+        for tv in &mut successful_versions {
+            if matches!(tv.request.source(), ToolSource::Argument)
+                && let Some(tvl) = ts.versions.get(tv.ba())
+                && matches!(&tvl.source, ToolSource::MiseToml(_))
+            {
+                // Use the config's request (preserves version specifier like "latest")
+                // but keep the resolved version from the upgrade
+                if let Some(config_tv) = tvl.versions.first() {
+                    tv.request = config_tv.request.clone();
+                } else {
+                    tv.request.set_source(tvl.source.clone());
+                }
+            }
+        }
+
         config::rebuild_shims_and_runtime_symlinks(config, ts, &successful_versions).await?;
 
         if successful_versions.iter().any(|v| v.short() == "python") {
@@ -310,6 +412,7 @@ impl Upgrade {
                 });
         }
 
+        mpr.finish_progress();
         Self::print_summary(&outdated, &successful_versions)?;
 
         install_error
@@ -368,14 +471,10 @@ impl Upgrade {
         }
     }
 
-    /// Get the before_date from CLI flag or settings
+    /// Get the before_date from the CLI --before flag only.
+    /// Per-tool and global setting fallbacks are handled in ToolRequest::resolve.
     fn get_before_date(&self) -> Result<Option<Timestamp>> {
-        // CLI flag takes precedence over settings
         if let Some(before) = &self.before {
-            return Ok(Some(parse_into_timestamp(before)?));
-        }
-        // Fall back to settings
-        if let Some(before) = &Settings::get().install_before {
             return Ok(Some(parse_into_timestamp(before)?));
         }
         Ok(None)
@@ -408,5 +507,8 @@ static AFTER_LONG_HELP: &str = color_print::cstr!(
 
     # Show a multiselect menu to choose which tools to upgrade
     $ <bold>mise upgrade --interactive</bold>
+
+    # Only upgrade tools defined in local mise.toml, not global ones
+    $ <bold>mise upgrade --local</bold>
 "#
 );

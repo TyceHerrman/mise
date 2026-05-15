@@ -58,6 +58,34 @@ impl Plugin {
     }
 }
 
+/// The type of attestation that was successfully verified.
+///
+/// This is the vfox-relevant subset of `ProvenanceType` in `src/lockfile.rs`.
+/// `Minisign` is intentionally absent — vfox plugins do not produce Minisign
+/// signatures, so there is no vfox-side variant for it.
+///
+/// When adding a new vfox attestation type, add a variant here **and** add the
+/// corresponding variant to `ProvenanceType` in `src/lockfile.rs`, then update
+/// `verified_attestation_to_provenance()` to bridge the two enums.
+///
+/// Priority order (highest first): GithubAttestations > Slsa > Cosign.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum VerifiedAttestation {
+    /// GitHub artifact attestations (owner/repo, optional signer workflow).
+    GithubAttestations {
+        owner: String,
+        repo: String,
+        signer_workflow: Option<String>,
+    },
+    /// SLSA provenance verification.
+    Slsa { provenance_path: PathBuf },
+    /// Cosign signature/bundle verification.
+    Cosign {
+        sig_or_bundle_path: PathBuf,
+        public_key_path: Option<PathBuf>,
+    },
+}
+
 /// Optional attestation parameters provided by the return value of the preinstall hook.
 #[derive(Debug)]
 pub struct PreInstallAttestation {
@@ -77,7 +105,7 @@ impl FromLua for PreInstallAttestation {
     fn from_lua(value: Value, _: &Lua) -> std::result::Result<Self, LuaError> {
         match value {
             Value::Table(table) => {
-                validate_github_attestation_params(&table)?;
+                validate_github_artifact_attestation_params(&table)?;
                 validate_cosign_attestation_params(&table)?;
                 validate_slsa_attestation_params(&table)?;
 
@@ -103,17 +131,17 @@ impl FromLua for PreInstallAttestation {
     }
 }
 
-/// Validates that if one of the GitHub attestation parameters are set, the other requisite
+/// Validates that if one of the GitHub artifact attestation parameters are set, the other requisite
 /// parameters are also set.
 ///
 /// `github_repo` requires `github_owner` and vice versa, and `github_signer_workflow` requires
 /// both aforementioned parameters.
-fn validate_github_attestation_params(table: &Table) -> std::result::Result<(), LuaError> {
+fn validate_github_artifact_attestation_params(table: &Table) -> std::result::Result<(), LuaError> {
     if table.contains_key("github_owner")? && !table.contains_key("github_repo")? {
         return Err(LuaError::FromLuaConversionError {
             from: "table",
             to: "PreInstallAttestation".into(),
-            message: Some("github_owner requires github_repo for attestation".to_string()),
+            message: Some("github_owner requires github_repo for artifact attestation".to_string()),
         });
     }
 
@@ -121,7 +149,7 @@ fn validate_github_attestation_params(table: &Table) -> std::result::Result<(), 
         return Err(LuaError::FromLuaConversionError {
             from: "table",
             to: "PreInstallAttestation".into(),
-            message: Some("github_repo requires github_owner for attestation".to_string()),
+            message: Some("github_repo requires github_owner for artifact attestation".to_string()),
         });
     }
 
@@ -132,7 +160,7 @@ fn validate_github_attestation_params(table: &Table) -> std::result::Result<(), 
             from: "table",
             to: "PreInstallAttestation".into(),
             message: Some(
-                "github_signer_workflow requires github_owner and github_repo for attestation"
+                "github_signer_workflow requires github_owner and github_repo for artifact attestation"
                     .to_string(),
             ),
         });
@@ -219,7 +247,9 @@ impl FromLua for PreInstall {
 mod tests {
     use crate::Plugin;
     use crate::hooks::pre_install::PreInstall;
+    use crate::hooks::pre_install::PreInstallAttestation;
     use crate::runtime::Runtime;
+    use mlua::{FromLua, Lua};
     use std::string::ToString;
     use tokio::test;
 
@@ -247,6 +277,132 @@ mod tests {
         assert_debug_snapshot!(pre_install);
 
         Runtime::reset();
+    }
+
+    #[test]
+    async fn test_runtime_env_type_is_nil_for_platform_override() {
+        let plugin = Plugin::test("dummy");
+
+        Runtime::set_env_type(Some("gnu".to_string()));
+
+        let host_env_type: Option<String> = plugin
+            .eval_async(chunk! {
+                return RUNTIME.envType
+            })
+            .await
+            .unwrap();
+        assert_eq!(host_env_type, Some("gnu".to_string()));
+
+        let target_runtime = Runtime::with_platform(plugin.dir.clone(), "linux", "amd64");
+        let target_os = "linux".to_string();
+        let target_arch = "amd64".to_string();
+        let target_env_type: Option<String> = plugin
+            .eval_async(chunk! {
+                local saved_os = OS_TYPE
+                local saved_arch = ARCH_TYPE
+                local saved_runtime = RUNTIME
+                OS_TYPE = $target_os
+                ARCH_TYPE = $target_arch
+                RUNTIME = $target_runtime
+                local env_type = RUNTIME.envType
+                OS_TYPE = saved_os
+                ARCH_TYPE = saved_arch
+                RUNTIME = saved_runtime
+                return env_type
+            })
+            .await
+            .unwrap();
+        assert_eq!(target_env_type, None);
+
+        Runtime::reset();
+    }
+
+    #[test]
+    async fn test_attestation_plugin() {
+        let pre_install = run("attestation", "1.2.3").await;
+        assert_debug_snapshot!(pre_install);
+    }
+
+    #[test]
+    async fn test_github_attestation_valid() {
+        let lua = Lua::new();
+        let table = lua.create_table().unwrap();
+        table.set("github_owner", "owner").unwrap();
+        table.set("github_repo", "repo").unwrap();
+        let att = PreInstallAttestation::from_lua(mlua::Value::Table(table), &lua).unwrap();
+        assert_eq!(att.github_owner, Some("owner".to_string()));
+        assert_eq!(att.github_repo, Some("repo".to_string()));
+        assert_eq!(att.github_signer_workflow, None);
+    }
+
+    #[test]
+    async fn test_github_attestation_owner_without_repo() {
+        let lua = Lua::new();
+        let table = lua.create_table().unwrap();
+        table.set("github_owner", "owner").unwrap();
+        let result = PreInstallAttestation::from_lua(mlua::Value::Table(table), &lua);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("github_owner requires github_repo"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    async fn test_github_attestation_repo_without_owner() {
+        let lua = Lua::new();
+        let table = lua.create_table().unwrap();
+        table.set("github_repo", "repo").unwrap();
+        let result = PreInstallAttestation::from_lua(mlua::Value::Table(table), &lua);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("github_repo requires github_owner"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    async fn test_github_attestation_signer_without_owner_repo() {
+        let lua = Lua::new();
+        let table = lua.create_table().unwrap();
+        table.set("github_signer_workflow", "wf.yml").unwrap();
+        let result = PreInstallAttestation::from_lua(mlua::Value::Table(table), &lua);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("github_signer_workflow requires github_owner and github_repo"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    async fn test_cosign_public_key_without_sig() {
+        let lua = Lua::new();
+        let table = lua.create_table().unwrap();
+        table.set("cosign_public_key_path", "/tmp/key.pub").unwrap();
+        let result = PreInstallAttestation::from_lua(mlua::Value::Table(table), &lua);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("cosign_public_key_path requires cosign_sig_or_bundle_path"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    async fn test_slsa_min_level_without_provenance() {
+        let lua = Lua::new();
+        let table = lua.create_table().unwrap();
+        table.set("slsa_min_level", 2).unwrap();
+        let result = PreInstallAttestation::from_lua(mlua::Value::Table(table), &lua);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("slsa_min_level requires slsa_provenance_path"),
+            "unexpected error: {err}"
+        );
     }
 
     async fn run(plugin: &str, v: &str) -> PreInstall {

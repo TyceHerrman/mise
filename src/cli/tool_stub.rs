@@ -7,7 +7,9 @@ use crate::dirs;
 use crate::file;
 use crate::hash;
 use crate::lockfile::PlatformInfo;
-use crate::toolset::{InstallOptions, ToolRequest, ToolSource, ToolVersionOptions};
+use crate::toolset::{
+    CoreToolOptions, InstallOptions, ToolRequest, ToolSource, ToolVersionOptions,
+};
 use clap::Parser;
 use color_eyre::eyre::{Result, bail, eyre};
 use eyre::ensure;
@@ -26,7 +28,7 @@ pub struct ToolStubFile {
     pub os: Option<Vec<String>>,
     pub lock: Option<ToolStubLock>,
     #[serde(flatten, deserialize_with = "deserialize_tool_stub_options")]
-    pub opts: indexmap::IndexMap<String, String>,
+    pub opts: indexmap::IndexMap<String, toml::Value>,
     #[serde(skip)]
     pub tool_name: String,
 }
@@ -42,15 +44,13 @@ pub struct ToolStubLockPlatform {
     pub checksum: Option<String>,
 }
 
-// Custom deserializer that converts TOML values to strings for storage in opts
+// Custom deserializer that keeps TOML values native, converting scalars to strings
 fn deserialize_tool_stub_options<'de, D>(
     deserializer: D,
-) -> Result<indexmap::IndexMap<String, String>, D::Error>
+) -> Result<indexmap::IndexMap<String, toml::Value>, D::Error>
 where
     D: Deserializer<'de>,
 {
-    use serde::de::Error;
-
     let value = Value::deserialize(deserializer)?;
     let mut opts = indexmap::IndexMap::new();
 
@@ -64,20 +64,13 @@ where
                 continue;
             }
 
-            // Convert TOML values to strings for storage
-            let string_value = match val {
-                Value::String(s) => s,
-                Value::Table(_) | Value::Array(_) => {
-                    // For complex values (tables, arrays), serialize them as TOML strings
-                    toml::to_string(&val).map_err(D::Error::custom)?
-                }
-                Value::Integer(i) => i.to_string(),
-                Value::Float(f) => f.to_string(),
-                Value::Boolean(b) => b.to_string(),
-                Value::Datetime(dt) => dt.to_string(),
+            let stored_value = match val {
+                Value::String(_) | Value::Table(_) | Value::Array(_) => val,
+                // Convert scalar values (ints, bools, floats) to strings
+                _ => Value::String(val.to_string().trim_matches('"').to_string()),
             };
 
-            opts.insert(key, string_value);
+            opts.insert(key, stored_value);
         }
     }
 
@@ -88,7 +81,7 @@ fn default_version() -> String {
     "latest".to_string()
 }
 
-fn has_http_backend_config(opts: &indexmap::IndexMap<String, String>) -> bool {
+fn has_http_backend_config(opts: &indexmap::IndexMap<String, toml::Value>) -> bool {
     // Check for top-level url
     if opts.contains_key("url") {
         return true;
@@ -96,8 +89,21 @@ fn has_http_backend_config(opts: &indexmap::IndexMap<String, String>) -> bool {
 
     // Check for platform-specific configs with urls
     for (key, value) in opts {
-        if key.starts_with("platforms") && value.contains("url") {
-            return true;
+        if key.starts_with("platforms") {
+            // Check if the value is a table containing url keys
+            if let toml::Value::Table(table) = value {
+                for (_, v) in table {
+                    if let toml::Value::Table(inner) = v
+                        && inner.contains_key("url")
+                    {
+                        return true;
+                    }
+                }
+            } else if let toml::Value::String(s) = value
+                && s.contains("url")
+            {
+                return true;
+            }
         }
     }
 
@@ -153,7 +159,12 @@ impl ToolStubFile {
         let tool_name = stub
             .tool
             .clone()
-            .or_else(|| stub.opts.get("tool").map(|s| s.to_string()))
+            .or_else(|| {
+                stub.opts
+                    .get("tool")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string())
+            })
             .unwrap_or_else(|| {
                 if has_http_backend_config(&stub.opts) {
                     format!("http:{stub_name}")
@@ -185,13 +196,16 @@ impl ToolStubFile {
 
         // Add bin field if present
         if let Some(bin) = &self.bin {
-            opts.insert("bin".to_string(), bin.clone());
+            opts.insert("bin".to_string(), toml::Value::String(bin.clone()));
         }
 
         let options = ToolVersionOptions {
-            os: self.os.clone(),
-            install_env: self.install_env.clone(),
-            opts: opts.clone(),
+            core: CoreToolOptions {
+                os: self.os.clone(),
+                depends: None,
+                install_env: self.install_env.clone(),
+            },
+            opts: opts.into(),
         };
 
         // Set options on the BackendArg so they're available to the backend
@@ -199,12 +213,12 @@ impl ToolStubFile {
 
         // For HTTP backend with "latest" version, use URL+checksum hash as version for stability
         let version = if self.tool_name.starts_with("http:") && self.version == "latest" {
-            if let Some(url) =
-                lookup_platform_key(&options, "url").or_else(|| opts.get("url").cloned())
+            if let Some(url) = lookup_platform_key(&options, "url")
+                .or_else(|| options.get("url").map(|s| s.to_string()))
             {
                 // Include checksum in hash calculation for better version stability
                 let checksum = lookup_platform_key(&options, "checksum")
-                    .or_else(|| opts.get("checksum").cloned())
+                    .or_else(|| options.get("checksum").map(|s| s.to_string()))
                     .unwrap_or_default();
                 let hash_input = format!("{url}:{checksum}");
                 // Use first 8 chars of URL+checksum hash as version
@@ -403,9 +417,11 @@ fn resolve_platform_specific_bin(stub: &ToolStubFile, stub_path: &Path) -> Strin
     let platform_key = get_current_platform_key();
 
     // Check for platform-specific bin field: platforms.{platform}.bin
-    let platform_bin_key = format!("platforms.{platform_key}.bin");
-    if let Some(platform_bin) = stub.opts.get(&platform_bin_key) {
-        return platform_bin.to_string();
+    if let Some(toml::Value::Table(platforms)) = stub.opts.get("platforms")
+        && let Some(toml::Value::Table(platform)) = platforms.get(&platform_key)
+        && let Some(toml::Value::String(bin)) = platform.get("bin")
+    {
+        return bin.clone();
     }
 
     // Fall back to global bin field
@@ -569,7 +585,7 @@ async fn execute_with_tool_request(
             }
             env.insert(crate::env::PATH_KEY.to_string(), path_env.to_string());
 
-            crate::cli::exec::exec_program(bin_path, args, env)
+            crate::cli::exec::exec_program(bin_path, args, env, &Default::default()).await
         }
         Err(e) => match e {
             BinPathError::ToolNotFound(tool_name) => {
@@ -622,7 +638,7 @@ async fn execute_with_tool_request(
 /// The stub will automatically install the specified tool version if missing
 /// and execute it with any arguments passed to the stub.
 ///
-/// For more information, see: https://mise.jdx.dev/dev-tools/tool-stubs.html
+/// For more information, see: https://mise.en.dev/dev-tools/tool-stubs.html
 #[derive(Debug, Parser)]
 #[clap(disable_help_flag = true, disable_version_flag = true)]
 pub struct ToolStub {
@@ -686,7 +702,13 @@ pub(crate) async fn short_circuit_stub(args: &[String]) -> Result<()> {
     // Check if we have a cached binary path
     if let Some(bin_path) = BinPathCache::load(&cache_key) {
         let args = args[1..].to_vec();
-        return crate::cli::exec::exec_program(bin_path, args, BTreeMap::new());
+        return crate::cli::exec::exec_program(
+            bin_path,
+            args,
+            BTreeMap::new(),
+            &Default::default(),
+        )
+        .await;
     }
 
     // No cache hit, return Ok(()) to continue with normal processing

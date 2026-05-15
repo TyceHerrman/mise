@@ -2,13 +2,24 @@ use expr::{Context, Environment, Program, Value};
 use eyre::{Result, eyre};
 use indexmap::IndexSet;
 use itertools::Itertools;
-use serde_derive::Deserialize;
+use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
+use serde::{Deserialize, Deserializer};
 use std::cmp::PartialEq;
 use std::collections::HashMap;
 use versions::Versioning;
 
 /// Type of Aqua package
-#[derive(Debug, Deserialize, Default, Clone, PartialEq, strum::Display)]
+#[derive(
+    Debug,
+    Deserialize,
+    Archive,
+    RkyvDeserialize,
+    RkyvSerialize,
+    Default,
+    Clone,
+    PartialEq,
+    strum::Display,
+)]
 #[strum(serialize_all = "snake_case")]
 #[serde(rename_all = "snake_case")]
 pub enum AquaPackageType {
@@ -18,11 +29,26 @@ pub enum AquaPackageType {
     GithubRelease,
     Http,
     GoInstall,
+    GoBuild,
     Cargo,
 }
 
 /// Main Aqua package definition
-#[derive(Debug, Deserialize, Clone)]
+///
+/// rkyv archives parsed package data only. Runtime-only fields mirror serde's
+/// skipped behavior with `rkyv::with::Skip`.
+#[derive(Debug, Deserialize, Archive, RkyvDeserialize, RkyvSerialize, Clone)]
+#[rkyv(serialize_bounds(
+    __S: rkyv::ser::Writer + rkyv::ser::Allocator,
+    __S::Error: rkyv::rancor::Source,
+))]
+#[rkyv(deserialize_bounds(__D::Error: rkyv::rancor::Source))]
+#[rkyv(bytecheck(
+    bounds(
+        __C: rkyv::validation::ArchiveContext,
+        __C::Error: rkyv::rancor::Source,
+    )
+))]
 #[serde(default)]
 pub struct AquaPackage {
     pub r#type: AquaPackageType,
@@ -38,42 +64,89 @@ pub struct AquaPackage {
     pub complete_windows_ext: bool,
     pub supported_envs: Vec<String>,
     pub files: Vec<AquaFile>,
+    pub vars: Vec<AquaVar>,
+    #[serde(default, deserialize_with = "deserialize_string_map")]
     pub replacements: HashMap<String, String>,
     pub version_prefix: Option<String>,
     version_filter: Option<String>,
     #[serde(skip)]
+    #[rkyv(with = rkyv::with::Skip)]
     version_filter_expr: Option<Program>,
     pub version_source: Option<String>,
+    pub cosign: Option<AquaCosign>,
     pub checksum: Option<AquaChecksum>,
     pub slsa_provenance: Option<AquaSlsaProvenance>,
     pub minisign: Option<AquaMinisign>,
     pub github_artifact_attestations: Option<AquaGithubArtifactAttestations>,
+    #[rkyv(omit_bounds)]
     overrides: Vec<AquaOverride>,
     version_constraint: String,
+    #[rkyv(omit_bounds)]
     pub version_overrides: Vec<AquaPackage>,
     pub no_asset: bool,
     pub error_message: Option<String>,
     pub path: Option<String>,
+    #[serde(skip)]
+    #[rkyv(with = rkyv::with::Skip)]
+    var_values: HashMap<String, String>,
 }
 
 /// Override configuration for specific OS/architecture combinations
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Archive, RkyvDeserialize, RkyvSerialize, Clone)]
 struct AquaOverride {
     #[serde(flatten)]
     pkg: AquaPackage,
     goos: Option<String>,
     goarch: Option<String>,
+    #[serde(default)]
+    variants: Vec<AquaVariant>,
+}
+
+/// Runtime variant selector for an override.
+#[derive(Debug, Deserialize, Archive, RkyvDeserialize, RkyvSerialize, Clone)]
+struct AquaVariant {
+    key: String,
+    value: String,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct AquaRuntime<'a> {
+    libc: Option<&'a str>,
+}
+
+/// Variable definition for Aqua templates
+#[derive(Debug, Deserialize, Archive, RkyvDeserialize, RkyvSerialize, Clone, Default)]
+pub struct AquaVar {
+    pub name: String,
+    /// Aqua's schema allows arbitrary YAML defaults, but mise intentionally
+    /// supports only string defaults to keep variable resolution simple.
+    #[serde(default, deserialize_with = "deserialize_optional_scalar_string")]
+    pub default: Option<String>,
+    #[serde(default)]
+    pub required: bool,
 }
 
 /// File definition within a package
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Archive, RkyvDeserialize, RkyvSerialize, Clone, Default)]
 pub struct AquaFile {
     pub name: String,
     pub src: Option<String>,
+    pub link: Option<String>,
+    #[serde(default)]
+    pub hard: bool,
 }
 
 /// Checksum algorithm options
-#[derive(Debug, Deserialize, Clone, strum::AsRefStr, strum::Display)]
+#[derive(
+    Debug,
+    Deserialize,
+    Archive,
+    RkyvDeserialize,
+    RkyvSerialize,
+    Clone,
+    strum::AsRefStr,
+    strum::Display,
+)]
 #[serde(rename_all = "lowercase")]
 #[strum(serialize_all = "lowercase")]
 pub enum AquaChecksumAlgorithm {
@@ -84,7 +157,7 @@ pub enum AquaChecksumAlgorithm {
 }
 
 /// Type of checksum source
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Archive, RkyvDeserialize, RkyvSerialize, Clone)]
 #[serde(rename_all = "snake_case")]
 pub enum AquaChecksumType {
     GithubRelease,
@@ -92,7 +165,7 @@ pub enum AquaChecksumType {
 }
 
 /// Type of minisign source
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Archive, RkyvDeserialize, RkyvSerialize, Clone)]
 #[serde(rename_all = "snake_case")]
 pub enum AquaMinisignType {
     GithubRelease,
@@ -100,7 +173,7 @@ pub enum AquaMinisignType {
 }
 
 /// Cosign signature configuration
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Archive, RkyvDeserialize, RkyvSerialize, Clone)]
 pub struct AquaCosignSignature {
     pub r#type: Option<String>,
     pub repo_owner: Option<String>,
@@ -110,7 +183,7 @@ pub struct AquaCosignSignature {
 }
 
 /// Cosign verification configuration
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Archive, RkyvDeserialize, RkyvSerialize, Clone)]
 pub struct AquaCosign {
     pub enabled: Option<bool>,
     pub signature: Option<AquaCosignSignature>,
@@ -122,7 +195,7 @@ pub struct AquaCosign {
 }
 
 /// SLSA provenance configuration
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Archive, RkyvDeserialize, RkyvSerialize, Clone)]
 pub struct AquaSlsaProvenance {
     pub enabled: Option<bool>,
     pub r#type: Option<String>,
@@ -135,7 +208,7 @@ pub struct AquaSlsaProvenance {
 }
 
 /// Minisign verification configuration
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Archive, RkyvDeserialize, RkyvSerialize, Clone)]
 pub struct AquaMinisign {
     pub enabled: Option<bool>,
     pub r#type: Option<AquaMinisignType>,
@@ -147,14 +220,14 @@ pub struct AquaMinisign {
 }
 
 /// GitHub artifact attestations configuration
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Archive, RkyvDeserialize, RkyvSerialize, Clone)]
 pub struct AquaGithubArtifactAttestations {
     pub enabled: Option<bool>,
     pub signer_workflow: Option<String>,
 }
 
 /// Checksum verification configuration
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Archive, RkyvDeserialize, RkyvSerialize, Clone)]
 pub struct AquaChecksum {
     pub r#type: Option<AquaChecksumType>,
     pub algorithm: Option<AquaChecksumAlgorithm>,
@@ -167,7 +240,7 @@ pub struct AquaChecksum {
 }
 
 /// Checksum pattern configuration
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Archive, RkyvDeserialize, RkyvSerialize, Clone)]
 pub struct AquaChecksumPattern {
     pub checksum: String,
     pub file: Option<String>,
@@ -176,7 +249,94 @@ pub struct AquaChecksumPattern {
 /// Registry YAML file structure
 #[derive(Debug, Deserialize)]
 pub struct RegistryYaml {
-    pub packages: Vec<AquaPackage>,
+    pub packages: Vec<RegistryPackageRow>,
+}
+
+/// Top-level package row in a merged aqua registry YAML file.
+#[derive(Debug, Deserialize)]
+pub struct RegistryPackageRow {
+    #[serde(flatten)]
+    pub package: AquaPackage,
+    #[serde(default, deserialize_with = "deserialize_registry_aliases")]
+    pub aliases: Vec<String>,
+}
+
+fn deserialize_registry_aliases<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Vec<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let aliases = Option::<serde_yaml::Value>::deserialize(deserializer)?;
+    Ok(aliases
+        .and_then(|aliases| {
+            aliases
+                .as_sequence()
+                .map(|aliases| aliases.iter().filter_map(registry_alias_name).collect())
+        })
+        .unwrap_or_default())
+}
+
+fn registry_alias_name(alias: &serde_yaml::Value) -> Option<String> {
+    alias.get("name")?.as_str().map(str::to_string)
+}
+
+fn deserialize_optional_scalar_string<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Option<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = Option::<serde_yaml::Value>::deserialize(deserializer)?;
+    match value {
+        None | Some(serde_yaml::Value::Null) => Ok(None),
+        Some(value) => yaml_scalar_to_string(value).map(Some).ok_or_else(|| {
+            <D::Error as serde::de::Error>::custom("invalid type: expected a scalar string default")
+        }),
+    }
+}
+
+fn deserialize_string_map<'de, D>(
+    deserializer: D,
+) -> std::result::Result<HashMap<String, String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = Option::<serde_yaml::Value>::deserialize(deserializer)?;
+    let Some(value) = value else {
+        return Ok(HashMap::new());
+    };
+    let serde_yaml::Value::Mapping(mapping) = value else {
+        return Err(<D::Error as serde::de::Error>::custom(
+            "invalid type: expected a string map",
+        ));
+    };
+
+    mapping
+        .into_iter()
+        .map(|(key, value)| {
+            let key = yaml_scalar_to_string(key).ok_or_else(|| {
+                <D::Error as serde::de::Error>::custom(
+                    "invalid type: expected a scalar string map key",
+                )
+            })?;
+            let value = yaml_scalar_to_string(value).ok_or_else(|| {
+                <D::Error as serde::de::Error>::custom(
+                    "invalid type: expected a scalar string map value",
+                )
+            })?;
+            Ok((key, value))
+        })
+        .collect()
+}
+
+fn yaml_scalar_to_string(value: serde_yaml::Value) -> Option<String> {
+    match value {
+        serde_yaml::Value::String(value) => Some(value),
+        serde_yaml::Value::Bool(value) => Some(value.to_string()),
+        serde_yaml::Value::Number(value) => Some(value.to_string()),
+        _ => None,
+    }
 }
 
 impl Default for AquaPackage {
@@ -195,11 +355,13 @@ impl Default for AquaPackage {
             complete_windows_ext: true,
             supported_envs: Vec::new(),
             files: Vec::new(),
+            vars: Vec::new(),
             replacements: HashMap::new(),
             version_prefix: None,
             version_filter: None,
             version_filter_expr: None,
             version_source: None,
+            cosign: None,
             checksum: None,
             slsa_provenance: None,
             minisign: None,
@@ -210,31 +372,65 @@ impl Default for AquaPackage {
             no_asset: false,
             error_message: None,
             path: None,
+            var_values: HashMap::new(),
         }
     }
 }
 
 impl AquaPackage {
     /// Apply version-specific configurations and overrides
-    pub fn with_version(mut self, versions: &[&str], os: &str, arch: &str) -> AquaPackage {
-        self = apply_override(self.clone(), self.version_override(versions));
-        if let Some(avo) = self.overrides.clone().into_iter().find(|o| {
-            if let (Some(goos), Some(goarch)) = (&o.goos, &o.goarch) {
-                goos == os && goarch == arch
-            } else if let Some(goos) = &o.goos {
-                goos == os
-            } else if let Some(goarch) = &o.goarch {
-                goarch == arch
-            } else {
-                false
-            }
-        }) {
-            self = apply_override(self, &avo.pkg)
+    pub fn with_version(self, versions: &[&str], os: &str, arch: &str) -> AquaPackage {
+        self.with_version_runtime(versions, os, arch, AquaRuntime::default())
+    }
+
+    /// Apply version-specific configurations and overrides for a libc runtime variant.
+    pub fn with_version_libc(
+        self,
+        versions: &[&str],
+        os: &str,
+        arch: &str,
+        libc: Option<&str>,
+    ) -> AquaPackage {
+        self.with_version_runtime(versions, os, arch, AquaRuntime { libc })
+    }
+
+    fn with_version_runtime(
+        mut self,
+        versions: &[&str],
+        os: &str,
+        arch: &str,
+        runtime: AquaRuntime<'_>,
+    ) -> AquaPackage {
+        if let Some(version_override) = self
+            .version_override(versions)
+            .filter(|version_override| !std::ptr::eq(*version_override, &self))
+            .cloned()
+        {
+            self = apply_override(self, &version_override);
+        }
+        if let Some(pkg) = self
+            .overrides
+            .iter()
+            .find(|o| o.matches(os, arch, runtime))
+            .map(|o| o.pkg.clone())
+        {
+            self = apply_override(self, &pkg)
         }
         self
     }
 
-    fn version_override(&self, versions: &[&str]) -> &AquaPackage {
+    /// Apply user-provided variable values used by aqua `vars` templates.
+    pub fn with_var_values(mut self, var_values: HashMap<String, String>) -> Result<AquaPackage> {
+        self.var_values = var_values;
+        self.validate_vars()?;
+        Ok(self)
+    }
+
+    pub fn version_constraint_ok(&self, versions: &[&str]) -> bool {
+        self.version_override(versions).is_some()
+    }
+
+    fn version_override(&self, versions: &[&str]) -> Option<&AquaPackage> {
         let expressions = versions
             .iter()
             .map(|v| (self.expr_parser(v), self.expr_ctx(v)))
@@ -257,7 +453,6 @@ impl AquaPackage {
                     })
                 }
             })
-            .unwrap_or(self)
     }
 
     /// Detect the format of an archive based on its filename
@@ -328,32 +523,39 @@ impl AquaPackage {
         } else if os == "windows" {
             let mut ctx = HashMap::default();
             let asset = self.parse_aqua_str(&self.asset, v, &ctx, os, arch)?;
-            if self.complete_windows_ext && self.format(v, os, arch)? == "raw" {
-                strs.insert(format!("{asset}.exe"));
-            } else {
-                strs.insert(asset);
-            }
+            strs.insert(self.complete_windows_ext_to_asset(&asset, v, os, arch)?);
             if arch == "arm64" {
                 ctx.insert("Arch".to_string(), "amd64".to_string());
                 strs.insert(self.parse_aqua_str(&self.asset, v, &ctx, os, arch)?);
                 let asset = self.parse_aqua_str(&self.asset, v, &ctx, os, arch)?;
-                if self.complete_windows_ext && self.format(v, os, arch)? == "raw" {
-                    strs.insert(format!("{asset}.exe"));
-                } else {
-                    strs.insert(asset);
-                }
+                strs.insert(self.complete_windows_ext_to_asset(&asset, v, os, arch)?);
             }
         }
         Ok(strs)
     }
 
+    /// Apply Windows .exe extension to an asset or URL string if appropriate.
+    /// Mirrors upstream aqua's `completeWindowsExtToAsset` decision tree.
+    fn complete_windows_ext_to_asset(
+        &self,
+        s: &str,
+        v: &str,
+        os: &str,
+        arch: &str,
+    ) -> Result<String> {
+        if os != "windows" || s.ends_with(".exe") {
+            return Ok(s.to_string());
+        }
+        if self.complete_windows_ext && self.format(v, os, arch)? == "raw" {
+            return Ok(format!("{s}.exe"));
+        }
+        Ok(s.to_string())
+    }
+
     /// Get the URL for this package and version
     pub fn url(&self, v: &str, os: &str, arch: &str) -> Result<String> {
-        let mut url = self.url.clone();
-        if os == "windows" && self.complete_windows_ext && self.format(v, os, arch)? == "raw" {
-            url.push_str(".exe");
-        }
-        self.parse_aqua_str(&url, v, &Default::default(), os, arch)
+        let url = self.parse_aqua_str(&self.url, v, &Default::default(), os, arch)?;
+        self.complete_windows_ext_to_asset(&url, v, os, arch)
     }
 
     /// Parse an Aqua template string with variable substitution and platform info
@@ -394,9 +596,40 @@ impl AquaPackage {
         ctx.insert("GOARCH".to_string(), replace(actual_arch));
         ctx.insert("Arch".to_string(), replace(actual_arch));
         ctx.insert("Format".to_string(), replace(&self.format));
+        ctx.extend(self.vars_ctx()?);
         ctx.extend(overrides.clone());
 
         crate::template::render(s, &ctx)
+    }
+
+    fn vars_ctx(&self) -> Result<HashMap<String, String>> {
+        self.validate_vars()?;
+        let mut ctx = HashMap::new();
+        for var in &self.vars {
+            if let Some(value) = self.var_value(var)? {
+                ctx.insert(format!("Vars.{}", var.name), value);
+            }
+        }
+        Ok(ctx)
+    }
+
+    fn validate_vars(&self) -> Result<()> {
+        for var in &self.vars {
+            if var.name.is_empty() {
+                return Err(eyre!("aqua var name is empty"));
+            }
+            if var.required && self.var_value(var)?.is_none() {
+                return Err(eyre!("required aqua var not set: {}", var.name));
+            }
+        }
+        Ok(())
+    }
+
+    fn var_value(&self, var: &AquaVar) -> Result<Option<String>> {
+        if let Some(value) = self.var_values.get(&var.name) {
+            return Ok(Some(value.clone()));
+        }
+        Ok(var.default.clone())
     }
 
     /// Set up version filter expression if configured
@@ -466,6 +699,51 @@ impl AquaPackage {
     }
 }
 
+impl AquaOverride {
+    fn matches(&self, os: &str, arch: &str, runtime: AquaRuntime<'_>) -> bool {
+        let platform_matches = if let (Some(goos), Some(goarch)) = (&self.goos, &self.goarch) {
+            goos == os && goarch == arch
+        } else if let Some(goos) = &self.goos {
+            goos == os
+        } else if let Some(goarch) = &self.goarch {
+            goarch == arch
+        } else {
+            false
+        };
+
+        platform_matches
+            && self
+                .variants
+                .iter()
+                .all(|variant| variant.matches(os, runtime))
+    }
+}
+
+impl AquaVariant {
+    fn matches(&self, os: &str, runtime: AquaRuntime<'_>) -> bool {
+        match self.key.as_str() {
+            "libc" => match (
+                normalize_libc(runtime.libc),
+                normalize_libc(Some(&self.value)),
+            ) {
+                (Some(actual), Some(expected)) => os == "linux" && actual == expected,
+                _ => false,
+            },
+            key => {
+                log::debug!("unsupported aqua override variant key: {key}");
+                false
+            }
+        }
+    }
+}
+
+fn normalize_libc(libc: Option<&str>) -> Option<&str> {
+    match libc? {
+        "glibc" | "gnu" => Some("gnu"),
+        "musl" => Some("musl"),
+        _ => None,
+    }
+}
 /// splits a version number into an optional prefix and the remaining version string
 fn split_version_prefix(version: &str) -> (String, String) {
     version
@@ -493,8 +771,13 @@ fn split_version_prefix(version: &str) -> (String, String) {
 }
 
 impl AquaFile {
-    /// Get the source path for this file within the package
-    pub fn src(&self, pkg: &AquaPackage, v: &str, os: &str, arch: &str) -> Result<Option<String>> {
+    fn template_ctx(
+        &self,
+        pkg: &AquaPackage,
+        v: &str,
+        os: &str,
+        arch: &str,
+    ) -> Result<HashMap<String, String>> {
         let asset = pkg.asset(v, os, arch)?;
         let asset = asset.strip_suffix(".tar.gz").unwrap_or(&asset);
         let asset = asset.strip_suffix(".tar.xz").unwrap_or(asset);
@@ -512,10 +795,24 @@ impl AquaFile {
         let mut ctx = HashMap::new();
         ctx.insert("AssetWithoutExt".to_string(), asset.to_string());
         ctx.insert("FileName".to_string(), self.name.to_string());
+        Ok(ctx)
+    }
 
+    /// Get the source path for this file within the package
+    pub fn src(&self, pkg: &AquaPackage, v: &str, os: &str, arch: &str) -> Result<Option<String>> {
+        let ctx = self.template_ctx(pkg, v, os, arch)?;
         self.src
             .as_ref()
             .map(|src| pkg.parse_aqua_str(src, v, &ctx, os, arch))
+            .transpose()
+    }
+
+    /// Get the link path for this file.
+    pub fn link(&self, pkg: &AquaPackage, v: &str, os: &str, arch: &str) -> Result<Option<String>> {
+        let ctx = self.template_ctx(pkg, v, os, arch)?;
+        self.link
+            .as_ref()
+            .map(|link| pkg.parse_aqua_str(link, v, &ctx, os, arch))
             .transpose()
     }
 }
@@ -554,6 +851,9 @@ fn apply_override(mut orig: AquaPackage, avo: &AquaPackage) -> AquaPackage {
     if !avo.files.is_empty() {
         orig.files = avo.files.clone();
     }
+    if !avo.vars.is_empty() {
+        orig.vars = avo.vars.clone();
+    }
     orig.replacements.extend(avo.replacements.clone());
     if let Some(avo_version_prefix) = avo.version_prefix.clone() {
         orig.version_prefix = Some(avo_version_prefix);
@@ -569,6 +869,17 @@ fn apply_override(mut orig: AquaPackage, avo: &AquaPackage) -> AquaPackage {
             }
             None => {
                 orig.checksum = Some(avo_checksum.clone());
+            }
+        }
+    }
+
+    if let Some(avo_cosign) = &avo.cosign {
+        match &mut orig.cosign {
+            Some(cosign) => {
+                cosign.merge(avo_cosign.clone());
+            }
+            None => {
+                orig.cosign = Some(avo_cosign.clone());
             }
         }
     }
@@ -897,6 +1208,58 @@ impl AquaGithubArtifactAttestations {
 mod tests {
     use super::*;
 
+    fn default_str(value: &str) -> Option<String> {
+        Some(value.to_string())
+    }
+
+    fn first_registry_package(yml: &str) -> AquaPackage {
+        serde_yaml::from_str::<RegistryYaml>(yml)
+            .unwrap()
+            .packages
+            .into_iter()
+            .next()
+            .unwrap()
+            .package
+    }
+
+    #[test]
+    fn test_registry_package_row_aliases_are_top_level_only() {
+        let yml = r#"
+packages:
+  - name: example/canonical
+    aliases:
+      - name: example/alias
+      - name: 123
+      - other: ignored
+    unsupported_field: ignored
+    version_overrides:
+      - aliases:
+          - name: example/nested-alias
+"#;
+        let registry = serde_yaml::from_str::<RegistryYaml>(yml).unwrap();
+        let row = registry.packages.into_iter().next().unwrap();
+
+        assert_eq!(row.package.name.as_deref(), Some("example/canonical"));
+        assert_eq!(row.aliases, vec!["example/alias"]);
+        assert_eq!(row.package.version_overrides.len(), 1);
+    }
+
+    #[test]
+    fn test_registry_package_row_preserves_yaml_scalar_coercions() {
+        let yml = r#"
+packages:
+  - replacements:
+      386: i686
+    vars:
+      - name: enabled
+        default: true
+"#;
+        let pkg = first_registry_package(yml);
+
+        assert_eq!(pkg.replacements.get("386"), Some(&"i686".to_string()));
+        assert_eq!(pkg.vars[0].default.as_deref(), Some("true"));
+    }
+
     #[test]
     fn test_aqua_file_src_gradle() {
         // Test the gradle package src template: {{.AssetWithoutExt | trimSuffix "-bin"}}/bin/gradle
@@ -909,9 +1272,411 @@ mod tests {
         let file = AquaFile {
             name: "gradle".to_string(),
             src: Some("{{.AssetWithoutExt | trimSuffix \"-bin\"}}/bin/gradle".to_string()),
+            ..Default::default()
         };
 
         let result = file.src(&pkg, "8.14.3", "darwin", "arm64").unwrap();
         assert_eq!(result, Some("gradle-8.14.3/bin/gradle".to_string()));
+    }
+
+    #[test]
+    fn test_aqua_file_src_empty_asset_produces_absolute_path() {
+        // When a linked version name like "brew" matches a wrong version_override
+        // that has no asset field, the package ends up with an empty asset.
+        // The src template "{{.AssetWithoutExt}}/name" then renders to "/name"
+        // which is an absolute path — this caused a StripPrefixError panic
+        // in the aqua backend's list_bin_paths.
+        let pkg = AquaPackage {
+            repo_owner: "mozilla".to_string(),
+            repo_name: "sccache".to_string(),
+            asset: String::new(),
+            ..Default::default()
+        };
+        let file = AquaFile {
+            name: "sccache".to_string(),
+            src: Some("{{.AssetWithoutExt}}/sccache".to_string()),
+            ..Default::default()
+        };
+
+        let result = file.src(&pkg, "brew", "darwin", "arm64").unwrap();
+        assert_eq!(result, Some("/sccache".to_string()));
+    }
+
+    #[test]
+    fn test_version_override_non_version_string_matches_semver() {
+        // Non-version strings like "brew" are parsed as valid General versions
+        // by the versions crate, and can match semver constraints unexpectedly.
+        // This documents the root cause of the linked-version panic.
+        let pkg = AquaPackage {
+            version_constraint: "false".to_string(),
+            version_overrides: vec![
+                AquaPackage {
+                    version_constraint: "semver(\"<= 0.2.13\")".to_string(),
+                    error_message: Some("too old".to_string()),
+                    ..Default::default()
+                },
+                AquaPackage {
+                    version_constraint: "true".to_string(),
+                    asset: "tool-{{.Version}}.tar.gz".to_string(),
+                    format: "tar.gz".to_string(),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+
+        let result = pkg.version_override(&["brew"]).unwrap();
+        // "brew" matches semver("<= 0.2.13") instead of "true",
+        // because Versioning::new("brew") parses as General(Alphanum("brew"))
+        // which sorts before numeric versions.
+        assert!(result.error_message.is_some());
+        assert!(result.asset.is_empty());
+    }
+
+    #[test]
+    fn test_url_no_double_exe_extension() {
+        // When a Windows override URL already ends in .exe, complete_windows_ext
+        // should not append another .exe (which would produce .exe.exe).
+        let pkg = AquaPackage {
+            url: "https://example.com/tool/{{.Version}}/tool.exe".to_string(),
+            format: "raw".to_string(),
+            complete_windows_ext: true,
+            ..Default::default()
+        };
+
+        let url = pkg.url("1.0.0", "windows", "amd64").unwrap();
+        assert!(
+            !url.ends_with(".exe.exe"),
+            "URL should not have double .exe extension, got: {url}"
+        );
+        assert!(url.ends_with(".exe"));
+    }
+
+    #[test]
+    fn test_url_adds_exe_when_missing() {
+        // When a Windows URL does not end in .exe and format is raw,
+        // complete_windows_ext should append .exe.
+        let pkg = AquaPackage {
+            url: "https://example.com/tool/{{.Version}}/tool".to_string(),
+            format: "raw".to_string(),
+            complete_windows_ext: true,
+            ..Default::default()
+        };
+
+        let url = pkg.url("1.0.0", "windows", "amd64").unwrap();
+        assert!(
+            url.ends_with(".exe"),
+            "URL should end with .exe, got: {url}"
+        );
+    }
+
+    #[test]
+    fn test_asset_strs_no_double_exe_extension() {
+        // asset_strs should also not double .exe when asset already ends in .exe.
+        let pkg = AquaPackage {
+            asset: "tool.exe".to_string(),
+            format: "raw".to_string(),
+            complete_windows_ext: true,
+            ..Default::default()
+        };
+
+        let strs = pkg.asset_strs("1.0.0", "windows", "amd64").unwrap();
+        for s in &strs {
+            assert!(
+                !s.ends_with(".exe.exe"),
+                "Asset string should not have double .exe, got: {s}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_aqua_file_link_template() {
+        let pkg = AquaPackage {
+            repo_owner: "example".to_string(),
+            repo_name: "tool".to_string(),
+            asset: "tool-{{.Version}}.tar.gz".to_string(),
+            ..Default::default()
+        };
+        let file = AquaFile {
+            name: "tool".to_string(),
+            link: Some("{{.FileName}}-alias".to_string()),
+            ..Default::default()
+        };
+
+        let result = file.link(&pkg, "1.0.0", "linux", "amd64").unwrap();
+        assert_eq!(result, Some("tool-alias".to_string()));
+    }
+
+    #[test]
+    fn test_vars_default_value() {
+        let pkg = AquaPackage {
+            asset: "tool-{{.Vars.channel}}-{{.Version}}.tar.gz".to_string(),
+            vars: vec![AquaVar {
+                name: "channel".to_string(),
+                default: default_str("stable"),
+                required: false,
+            }],
+            ..Default::default()
+        };
+        let asset = pkg.asset("1.0.0", "linux", "amd64").unwrap();
+        assert_eq!(asset, "tool-stable-1.0.0.tar.gz");
+    }
+
+    #[test]
+    fn test_vars_override_value() {
+        let mut var_values = HashMap::new();
+        var_values.insert("channel".to_string(), "beta".to_string());
+        let pkg = AquaPackage {
+            asset: "tool-{{.Vars.channel}}-{{.Version}}.tar.gz".to_string(),
+            vars: vec![AquaVar {
+                name: "channel".to_string(),
+                default: default_str("stable"),
+                required: false,
+            }],
+            ..Default::default()
+        }
+        .with_var_values(var_values)
+        .unwrap();
+        let asset = pkg.asset("1.0.0", "linux", "amd64").unwrap();
+        assert_eq!(asset, "tool-beta-1.0.0.tar.gz");
+    }
+
+    #[test]
+    fn test_vars_default_unquoted_yaml_string() {
+        let yml = r#"
+packages:
+  - asset: tool-{{.Vars.channel}}-{{.Version}}.tar.gz
+    vars:
+      - name: channel
+        default: stable
+"#;
+        let pkg = first_registry_package(yml);
+        let asset = pkg.asset("1.0.0", "linux", "amd64").unwrap();
+        assert_eq!(asset, "tool-stable-1.0.0.tar.gz");
+    }
+
+    #[test]
+    fn test_vars_scalar_defaults_deserialize_as_strings() {
+        for (yaml_default, expected) in [("true", "true"), ("123", "123")] {
+            let yml = format!(
+                r#"
+packages:
+  - vars:
+      - name: channel
+        default: {yaml_default}
+"#
+            );
+            let pkg = first_registry_package(&yml);
+            assert_eq!(pkg.vars[0].default.as_deref(), Some(expected));
+        }
+    }
+
+    #[test]
+    fn test_vars_null_default_deserializes_as_none() {
+        let yml = r#"
+packages:
+  - vars:
+      - name: channel
+        default: null
+"#;
+        let pkg = first_registry_package(yml);
+        assert_eq!(pkg.vars[0].default, None);
+    }
+
+    #[test]
+    fn test_vars_sequence_and_mapping_defaults_fail_yaml_parse() {
+        for yaml_default in ["[stable, beta]", "{channel: stable}"] {
+            let yml = format!(
+                r#"
+packages:
+  - vars:
+      - name: channel
+        default: {yaml_default}
+"#
+            );
+            let err = serde_yaml::from_str::<RegistryYaml>(&yml).unwrap_err();
+            assert!(
+                err.to_string().contains("invalid type"),
+                "unexpected error for {yaml_default}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_vars_required_missing() {
+        let pkg = AquaPackage {
+            asset: "tool-{{.Vars.channel}}-{{.Version}}.tar.gz".to_string(),
+            vars: vec![AquaVar {
+                name: "channel".to_string(),
+                default: None,
+                required: true,
+            }],
+            ..Default::default()
+        };
+        let err = pkg.asset("1.0.0", "linux", "amd64").unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("required aqua var not set: channel"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn test_vars_required_missing_with_var_values() {
+        let pkg = AquaPackage {
+            vars: vec![AquaVar {
+                name: "go_version".to_string(),
+                default: None,
+                required: true,
+            }],
+            ..Default::default()
+        };
+        let err = pkg.with_var_values(HashMap::new()).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("required aqua var not set: go_version"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn test_vars_empty_name() {
+        let pkg = AquaPackage {
+            vars: vec![AquaVar {
+                name: String::new(),
+                default: None,
+                required: false,
+            }],
+            ..Default::default()
+        };
+        let err = pkg.asset("1.0.0", "linux", "amd64").unwrap_err();
+        assert!(
+            err.to_string().contains("aqua var name is empty"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn test_top_level_cosign_is_deserialized() {
+        let yml = r#"
+packages:
+  - cosign:
+      bundle:
+        type: github_release
+        asset: "{{.Asset}}.sigstore.json"
+"#;
+        let pkg = first_registry_package(yml);
+        assert!(pkg.cosign.is_some());
+        assert!(pkg.checksum.is_none());
+    }
+
+    #[test]
+    fn test_top_level_cosign_is_merged_from_version_override() {
+        let yml = r#"
+packages:
+  - asset: tool-{{.Version}}-{{.OS}}-{{.Arch}}
+    format: raw
+    cosign:
+      bundle:
+        type: github_release
+        asset: "{{.Asset}}.sigstore.json"
+    version_constraint: "false"
+    version_overrides:
+      - version_constraint: "true"
+        cosign:
+          key:
+            type: github_release
+            asset: cosign.pub
+"#;
+        let pkg = first_registry_package(yml).with_version(&["v1.0.0"], "linux", "amd64");
+        let cosign = pkg.cosign.unwrap();
+        assert!(cosign.bundle.is_some());
+        assert!(cosign.key.is_some());
+    }
+
+    #[test]
+    fn test_override_variants_match_linux_libc() {
+        let yml = r#"
+packages:
+  - url: https://example.com/tool-{{.Version}}-{{.OS}}-{{.Arch}}-gnu
+    format: raw
+    overrides:
+      - goos: linux
+        variants:
+          - key: libc
+            value: gnu
+      - goos: linux
+        url: https://example.com/tool-{{.Version}}-{{.OS}}-{{.Arch}}-musl
+        variants:
+          - key: libc
+            value: musl
+"#;
+        let pkg = first_registry_package(yml);
+
+        let gnu = pkg
+            .clone()
+            .with_version_libc(&["1.0.0"], "linux", "amd64", Some("gnu"));
+        let musl = pkg.with_version_libc(&["1.0.0"], "linux", "amd64", Some("musl"));
+
+        assert_eq!(
+            gnu.url("1.0.0", "linux", "amd64").unwrap(),
+            "https://example.com/tool-1.0.0-linux-amd64-gnu"
+        );
+        assert_eq!(
+            musl.url("1.0.0", "linux", "amd64").unwrap(),
+            "https://example.com/tool-1.0.0-linux-amd64-musl"
+        );
+    }
+
+    #[test]
+    fn test_override_variants_skip_unknown_keys() {
+        let yml = r#"
+packages:
+  - url: https://example.com/tool-default
+    format: raw
+    overrides:
+      - goos: linux
+        url: https://example.com/tool-avx2
+        variants:
+          - key: cpu
+            value: avx2
+      - goos: linux
+        url: https://example.com/tool-musl
+        variants:
+          - key: libc
+            value: musl
+"#;
+        let pkg = first_registry_package(yml).with_version_libc(
+            &["1.0.0"],
+            "linux",
+            "amd64",
+            Some("musl"),
+        );
+
+        assert_eq!(
+            pkg.url("1.0.0", "linux", "amd64").unwrap(),
+            "https://example.com/tool-musl"
+        );
+    }
+
+    #[test]
+    fn test_override_variants_do_not_match_without_runtime_libc() {
+        let yml = r#"
+packages:
+  - url: https://example.com/tool-default
+    format: raw
+    overrides:
+      - goos: linux
+        url: https://example.com/tool-musl
+        variants:
+          - key: libc
+            value: musl
+"#;
+        let pkg = first_registry_package(yml).with_version(&["1.0.0"], "linux", "amd64");
+
+        assert_eq!(
+            pkg.url("1.0.0", "linux", "amd64").unwrap(),
+            "https://example.com/tool-default"
+        );
     }
 }

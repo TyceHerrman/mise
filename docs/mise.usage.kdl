@@ -1,14 +1,10 @@
 name "mise"
 bin "mise"
-about "The front-end to your dev env"
-long_about r"mise is a tool for managing runtime versions. https://github.com/jdx/mise
+about "Dev tools, env vars, and tasks in one CLI"
+long_about r"mise prepares your development environment before each command runs. https://github.com/jdx/mise
 
-It's a replacement for tools like nvm, nodenv, rbenv, rvm, chruby, pyenv, etc.
-that works for any language. It's also great for managing linters/tools like
-jq and shellcheck.
-
-It is inspired by asdf and uses asdf's plugin ecosystem under the hood:
-https://asdf-vm.com/"
+It installs and switches between project tools, loads environment variables,
+and runs tasks from the same configuration."
 usage "Usage: mise [OPTIONS] <COMMAND>"
 flag "-C --cd" help="Change directory before running command" global=true {
     arg "<DIR>"
@@ -123,8 +119,12 @@ cmd "asdf" hide=true help="[internal] simulates asdf for plugins that call \"asd
     arg "[ARGS]..." help="all arguments" var=true
 }
 cmd "backends" help="Manage backends" {
-    alias "b"
-    alias "backend" "backend-list" hide=true
+    alias "b" "backend" "backend-list" hide=true
+    after_long_help r"Deprecation:
+
+The `mise b` alias is deprecated and will be removed in mise 2027.4.0.
+Use `mise backends` instead.
+"
     cmd "ls" help="List built-in backends" {
         alias "list"
         after_long_help r"Examples:
@@ -225,7 +225,7 @@ This can be used to temporarily disable mise in a shell session."
 cmd "direnv" help="Output direnv function to use mise inside direnv" {
     long_help r"Output direnv function to use mise inside direnv
 
-See https://mise.jdx.dev/direnv.html for more information
+See https://mise.en.dev/direnv.html for more information
 
 Because this generates the idiomatic files based on currently installed plugins,
 you should run this command after installing new plugins. Otherwise
@@ -235,7 +235,7 @@ direnv may not know to update environment variables when legacy file versions ch
     cmd "activate" help="Output direnv function to use mise inside direnv" {
         long_help r"Output direnv function to use mise inside direnv
 
-See https://mise.jdx.dev/direnv.html for more information
+See https://mise.en.dev/direnv.html for more information
 
 Because this generates the legacy files based on currently installed plugins,
 you should run this command after installing new plugins. Otherwise

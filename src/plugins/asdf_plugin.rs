@@ -1,15 +1,16 @@
 use crate::config::{Config, Settings};
 use crate::errors::Error::PluginNotInstalled;
-use crate::file::{display_path, remove_all};
+use crate::file::{display_path, remove_all_with_progress};
 use crate::git::{CloneOptions, Git};
 use crate::http::HTTP;
-use crate::plugins::{Plugin, PluginSource, Script, ScriptManager};
+use crate::plugins::{Plugin, PluginSource, PluginType, Script, ScriptManager};
 use crate::result::Result;
 use crate::timeout::run_with_timeout;
+use crate::toolset::install_state;
 use crate::ui::multi_progress_report::MultiProgressReport;
 use crate::ui::progress_report::SingleReport;
 use crate::ui::prompt;
-use crate::{dirs, env, exit, file, lock_file, registry};
+use crate::{backend, dirs, env, exit, file, lock_file, registry};
 use async_trait::async_trait;
 use clap::Command;
 use console::style;
@@ -235,6 +236,14 @@ impl Plugin for AsdfPlugin {
         self.repo().current_sha_short().map(Some)
     }
 
+    fn remote_sha(&self) -> eyre::Result<Option<String>> {
+        if !self.is_installed() {
+            return Ok(None);
+        }
+        let branch = self.repo().current_branch()?;
+        self.repo().remote_sha(&branch)
+    }
+
     fn is_installed(&self) -> bool {
         self.plugin_path.exists()
     }
@@ -285,7 +294,12 @@ impl Plugin for AsdfPlugin {
         let pr = mpr.add_with_options(&prefix, dry_run);
         if !dry_run {
             let _lock = lock_file::get(&self.plugin_path, force)?;
-            self.install(config, pr.as_ref()).await
+            self.install(config, pr.as_ref()).await?;
+            let plugin_type =
+                PluginType::from_plugin_path(&self.plugin_path).unwrap_or(PluginType::Asdf);
+            install_state::add_plugin(&self.name, plugin_type).await?;
+            backend::remove(&self.name);
+            Ok(())
         } else {
             Ok(())
         }
@@ -327,20 +341,7 @@ impl Plugin for AsdfPlugin {
         self.exec_hook(pr, "pre-plugin-remove")?;
         pr.set_message("uninstall".into());
 
-        let rmdir = |dir: &Path| {
-            if !dir.exists() {
-                return Ok(());
-            }
-            pr.set_message(format!("remove {}", display_path(dir)));
-            remove_all(dir).wrap_err_with(|| {
-                format!(
-                    "Failed to remove directory {}",
-                    style(display_path(dir)).cyan().for_stderr()
-                )
-            })
-        };
-
-        rmdir(&self.plugin_path)?;
+        remove_all_with_progress(&self.plugin_path, pr)?;
 
         Ok(())
     }

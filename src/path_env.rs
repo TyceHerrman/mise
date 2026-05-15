@@ -54,13 +54,22 @@ impl FromIterator<PathBuf> for PathEnv {
     fn from_iter<T: IntoIterator<Item = PathBuf>>(paths: T) -> Self {
         let settings = Settings::get();
 
+        // When not_found_auto_install is enabled, preserve shims in PATH so they can
+        // trigger auto-install for tools that aren't installed yet
+        let preserve_shims = settings.not_found_auto_install;
+
         let mut path_env = Self::new();
 
         for path in paths {
             if path_env.seen_shims {
                 path_env.post.push(path);
-            } else if path == *dirs::SHIMS && !settings.activate_aggressive {
+            } else if crate::file::paths_eq(&crate::file::replace_path(&path), &dirs::SHIMS)
+                && !settings.activate_aggressive
+            {
                 path_env.seen_shims = true;
+                if preserve_shims {
+                    path_env.post.push(path);
+                }
             } else {
                 path_env.pre.push(path);
             }
@@ -100,12 +109,13 @@ mod tests {
     #[tokio::test]
     async fn test_path_env() {
         let _config = Config::get().await.unwrap();
+        let shims = dirs::SHIMS.to_str().unwrap();
         let mut path_env = PathEnv::from_iter(
             [
                 "/before-1",
                 "/before-2",
                 "/before-3",
-                dirs::SHIMS.to_str().unwrap(),
+                shims,
                 "/after-1",
                 "/after-2",
                 "/after-3",
@@ -117,7 +127,7 @@ mod tests {
         path_env.add("/3".into());
         assert_eq!(
             path_env.to_string(),
-            "/before-1:/before-2:/before-3:/1:/2:/3:/after-1:/after-2:/after-3".to_string()
+            format!("/before-1:/before-2:/before-3:/1:/2:/3:{shims}:/after-1:/after-2:/after-3")
         );
     }
 

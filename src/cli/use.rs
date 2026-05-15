@@ -16,7 +16,8 @@ use crate::duration::parse_into_timestamp;
 use crate::file::display_path;
 use crate::registry::REGISTRY;
 use crate::toolset::{
-    InstallOptions, ResolveOptions, ToolRequest, ToolSource, ToolVersion, ToolsetBuilder,
+    ConfigScope, InstallOptions, ResolveOptions, ToolRequest, ToolSource, ToolVersion,
+    ToolsetBuilder,
 };
 use crate::ui::ctrlc;
 use crate::{config, env, exit, file};
@@ -27,7 +28,7 @@ use crate::{config, env, exit, file};
 /// By default, this will use a `mise.toml` file in the current directory.
 /// If multiple config files exist (e.g., both `mise.toml` and `mise.local.toml`),
 /// the lowest precedence file (`mise.toml`) will be used.
-/// See https://mise.jdx.dev/configuration.html#target-file-for-write-operations
+/// See https://mise.en.dev/configuration.html#target-file-for-write-operations
 ///
 /// In the following order:
 ///   - If `--global` is set, it will use the global config file.
@@ -104,7 +105,7 @@ pub struct Use {
     /// Set `MISE_PIN=1` to make this the default behavior
     ///
     /// Consider using mise.lock as a better alternative to pinning in mise.toml:
-    /// https://mise.jdx.dev/configuration/settings.html#lockfile
+    /// https://mise.en.dev/configuration/settings.html#lockfile
     #[clap(long, verbatim_doc_comment, overrides_with = "fuzzy")]
     pin: bool,
 
@@ -129,8 +130,13 @@ impl Use {
         }
         env::TOOL_ARGS.write().unwrap().clone_from(&self.tool);
         let mut config = Config::get().await?;
+        let scope = if self.global {
+            ConfigScope::GlobalOnly
+        } else {
+            ConfigScope::All
+        };
         let mut ts = ToolsetBuilder::new()
-            .with_global_only(self.global)
+            .with_scope(scope)
             .build(&config)
             .await?;
         let cf = self.get_config_file().await?;
@@ -138,6 +144,9 @@ impl Use {
             latest_versions: false,
             use_locked_version: true,
             before_date: self.get_before_date()?,
+            offline: false,
+            refresh_remote_versions: false,
+            inactive: false,
         };
         let versions: Vec<_> = self
             .tool
@@ -145,7 +154,7 @@ impl Use {
             .cloned()
             .map(|t| match t.tvr {
                 Some(tvr) => {
-                    if tvr.version() == "latest" {
+                    if tvr.version() == "latest" && !Settings::get().locked {
                         // user specified `@latest` so we should resolve the latest version
                         // TODO: this should only happen on this tool, not all of them
                         resolve_options.latest_versions = true;
@@ -281,6 +290,7 @@ impl Use {
         remove: &[BackendArg],
     ) -> Result<()> {
         let path = display_path(cf.get_path());
+        let quiet = Settings::get().quiet;
 
         if self.is_dry_run() {
             let mut messages = vec![];
@@ -296,17 +306,19 @@ impl Use {
             }
 
             if !messages.is_empty() {
-                miseprintln!(
-                    "{} would update {} ({})",
-                    style("mise").green(),
-                    style(&path).cyan().for_stderr(),
-                    messages.join(", ")
-                );
+                if !quiet {
+                    miseprintln!(
+                        "{} would update {} ({})",
+                        style("mise").green(),
+                        style(&path).cyan().for_stderr(),
+                        messages.join(", ")
+                    );
+                }
                 if self.dry_run_code {
                     exit::exit(1);
                 }
             }
-        } else {
+        } else if !quiet {
             if !versions.is_empty() {
                 let tools = versions.iter().map(|t| t.style()).join(", ");
                 miseprintln!(
@@ -355,12 +367,10 @@ impl Use {
         }
     }
 
-    /// Get the before_date from CLI flag or settings
+    /// Get the before_date from the CLI --before flag only.
+    /// Per-tool and global setting fallbacks are handled in ToolRequest::resolve.
     fn get_before_date(&self) -> Result<Option<Timestamp>> {
         if let Some(before) = &self.before {
-            return Ok(Some(parse_into_timestamp(before)?));
-        }
-        if let Some(before) = &Settings::get().install_before {
             return Ok(Some(parse_into_timestamp(before)?));
         }
         Ok(None)
@@ -369,7 +379,7 @@ impl Use {
 
 static AFTER_LONG_HELP: &str = color_print::cstr!(
     r#"<bold><underline>Examples:</underline></bold>
-    
+
     # run with no arguments to use the interactive selector
     $ <bold>mise use</bold>
 

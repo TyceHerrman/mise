@@ -2,16 +2,17 @@ use crate::cli::Cli;
 use crate::config::ALL_TOML_CONFIG_FILES;
 use crate::duration;
 use crate::file::FindUp;
+use crate::platform::Platform;
 use crate::{dirs, env, file};
 #[allow(unused_imports)]
 use confique::env::parse::{list_by_colon, list_by_comma};
-use confique::{Config, Partial};
+use confique::{Config, Layer};
 use eyre::{Result, bail};
 use indexmap::{IndexMap, indexmap};
 use itertools::Itertools;
+use serde::Serialize;
 use serde::ser::Error;
 use serde::{Deserialize, Deserializer, Serializer};
-use serde_derive::Serialize;
 use std::env::consts::{ARCH, OS};
 use std::fmt::{Debug, Display, Formatter};
 use std::path::{Path, PathBuf};
@@ -47,6 +48,9 @@ pub struct SettingsMeta {
     // pub key: String,
     pub type_: SettingsType,
     pub description: &'static str,
+    pub deprecated: Option<&'static str>,
+    pub deprecated_warn_at: Option<&'static str>,
+    pub deprecated_remove_at: Option<&'static str>,
 }
 
 #[derive(
@@ -71,6 +75,29 @@ pub enum SettingsStatusMissingTools {
     IfOtherVersionsInstalled,
     /// always show the warning if tools are missing
     Always,
+}
+
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Serialize,
+    Deserialize,
+    Default,
+    strum::EnumString,
+    strum::Display,
+    PartialEq,
+    Eq,
+)]
+#[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
+pub enum NpmPackageManager {
+    #[default]
+    Auto,
+    Npm,
+    Aube,
+    Bun,
+    Pnpm,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -172,7 +199,7 @@ impl serde::Serialize for PythonUvVenvAuto {
     }
 }
 
-pub type SettingsPartial = <Settings as Config>::Partial;
+pub type SettingsPartial = <Settings as Config>::Layer;
 
 static BASE_SETTINGS: RwLock<Option<Arc<Settings>>> = RwLock::new(None);
 static CLI_SETTINGS: Mutex<Option<SettingsPartial>> = Mutex::new(None);
@@ -195,6 +222,32 @@ pub fn is_loaded() -> bool {
 pub struct SettingsFile {
     #[serde(default)]
     pub settings: SettingsPartial,
+}
+
+fn warn_deprecated(key: &str) {
+    if let Some(meta) = SETTINGS_META.get(key)
+        && let (Some(msg), Some(warn_at), Some(remove_at)) = (
+            meta.deprecated,
+            meta.deprecated_warn_at,
+            meta.deprecated_remove_at,
+        )
+    {
+        use versions::Versioning;
+        let warn_version = Versioning::new(warn_at).unwrap();
+        let remove_version = Versioning::new(remove_at).unwrap();
+        debug_assert!(
+            *crate::cli::version::V < remove_version,
+            "Deprecated setting [{key}] should have been removed in {remove_at}. Please remove this deprecated setting.",
+        );
+        if *crate::cli::version::V >= warn_version {
+            let id = Box::leak(format!("setting.{key}").into_boxed_str());
+            if crate::output::DEPRECATED.lock().unwrap().insert(id) {
+                warn!(
+                    "deprecated [setting.{key}]: {msg} This will be removed in mise {remove_at}."
+                );
+            }
+        }
+    }
 }
 
 impl Settings {
@@ -311,55 +364,84 @@ impl Settings {
 
     /// Sets deprecated settings to new names
     fn set_hidden_configs(&mut self) {
+        if let Some(v) = self.install_before.take() {
+            warn_deprecated("install_before");
+            if self.minimum_release_age.is_none() {
+                self.minimum_release_age = Some(v);
+            }
+        }
+        // Migrate task_* settings to task.* (must run before auto_install override below)
+        if let Some(v) = self.task_disable_paths.take()
+            && !v.is_empty()
+        {
+            warn_deprecated("task_disable_paths");
+            self.task.disable_paths.extend(v);
+        }
+        if let Some(v) = self.task_output.take() {
+            warn_deprecated("task_output");
+            self.task.output = Some(v);
+        }
+        if let Some(v) = self.task_remote_no_cache {
+            warn_deprecated("task_remote_no_cache");
+            self.task.remote_no_cache = Some(v);
+        }
+        if let Some(v) = self.task_run_auto_install {
+            warn_deprecated("task_run_auto_install");
+            self.task.run_auto_install = v;
+        }
+        if let Some(v) = self.task_show_full_cmd {
+            warn_deprecated("task_show_full_cmd");
+            self.task.show_full_cmd = v;
+        }
+        if let Some(v) = self.task_skip.take()
+            && !v.is_empty()
+        {
+            warn_deprecated("task_skip");
+            self.task.skip.extend(v);
+        }
+        if let Some(v) = self.task_skip_depends {
+            warn_deprecated("task_skip_depends");
+            self.task.skip_depends = v;
+        }
+        if let Some(v) = self.task_timeout.take() {
+            warn_deprecated("task_timeout");
+            self.task.timeout = Some(v);
+        }
+        if let Some(v) = self.task_timings {
+            warn_deprecated("task_timings");
+            self.task.timings = Some(v);
+        }
         if !self.auto_install {
             self.exec_auto_install = false;
             self.not_found_auto_install = false;
-            self.task_run_auto_install = false;
+            self.task.run_auto_install = false;
         }
-        if let Some(false) = self.asdf {
-            self.disable_backends.push("asdf".to_string());
+        if let Some(go_default_packages_file) = &self.go_default_packages_file {
+            self.go.default_packages_file = go_default_packages_file.clone();
         }
-        if let Some(false) = self.vfox {
-            self.disable_backends.push("vfox".to_string());
+        if let Some(go_download_mirror) = &self.go_download_mirror {
+            self.go.download_mirror = go_download_mirror.clone();
         }
-        if let Some(disable_default_shorthands) = self.disable_default_shorthands {
-            self.disable_default_registry = disable_default_shorthands;
+        if let Some(go_repo) = &self.go_repo {
+            self.go.repo = go_repo.clone();
         }
-        if let Some(cargo_binstall) = self.cargo_binstall {
-            self.cargo.binstall = cargo_binstall;
+        if let Some(go_set_gobin) = self.go_set_gobin {
+            self.go.set_gobin = Some(go_set_gobin);
         }
-        if let Some(pipx_uvx) = self.pipx_uvx {
-            self.pipx.uvx = Some(pipx_uvx);
+        if let Some(go_set_gopath) = self.go_set_gopath {
+            self.go.set_gopath = go_set_gopath;
         }
-        if let Some(python_compile) = self.python_compile {
-            self.python.compile = Some(python_compile);
+        if let Some(go_set_goroot) = self.go_set_goroot {
+            self.go.set_goroot = go_set_goroot;
         }
-        if let Some(python_default_packages_file) = &self.python_default_packages_file {
-            self.python.default_packages_file = Some(python_default_packages_file.clone());
-        }
-        if let Some(python_patch_url) = &self.python_patch_url {
-            self.python.patch_url = Some(python_patch_url.clone());
-        }
-        if let Some(python_patches_directory) = &self.python_patches_directory {
-            self.python.patches_directory = Some(python_patches_directory.clone());
-        }
-        if let Some(python_precompiled_arch) = &self.python_precompiled_arch {
-            self.python.precompiled_arch = Some(python_precompiled_arch.clone());
-        }
-        if let Some(python_precompiled_os) = &self.python_precompiled_os {
-            self.python.precompiled_os = Some(python_precompiled_os.clone());
-        }
-        if let Some(python_pyenv_repo) = &self.python_pyenv_repo {
-            self.python.pyenv_repo = python_pyenv_repo.clone();
-        }
-        if let Some(python_venv_stdlib) = self.python_venv_stdlib {
-            self.python.venv_stdlib = python_venv_stdlib;
-        }
-        if let Some(python_venv_auto_create) = self.python_venv_auto_create {
-            self.python.venv_auto_create = python_venv_auto_create;
+        if let Some(go_skip_checksum) = self.go_skip_checksum {
+            self.go.skip_checksum = go_skip_checksum;
         }
         if self.npm.bun {
-            self.npm.package_manager = "bun".to_string();
+            self.npm.package_manager = NpmPackageManager::Bun;
+        }
+        if self.shorthands_file.is_some() {
+            warn_deprecated("shorthands_file");
         }
     }
 
@@ -390,8 +472,11 @@ impl Settings {
         if cli.yes {
             s.yes = Some(true);
         }
-        if cli.quiet {
+        if cli.quiet || cli.silent {
             s.quiet = Some(true);
+        }
+        if cli.silent {
+            s.silent = Some(true);
         }
         if cli.trace {
             s.log_level = Some("trace".to_string());
@@ -439,9 +524,9 @@ impl Settings {
                 "cd",
                 "debug",
                 "env_file",
+                "install_before",
                 "trace",
                 "log_level",
-                "python_venv_auto_create",
             ]
             .into()
         });
@@ -453,6 +538,41 @@ impl Settings {
         *BASE_SETTINGS.write().unwrap() = None;
         // Clear caches that depend on settings and environment
         crate::config::config_file::config_root::reset();
+    }
+
+    /// Merge an override into the CLI-level settings partial.
+    ///
+    /// `reset` replaces CLI_SETTINGS wholesale, which would clobber overrides
+    /// installed earlier in startup (`--offline`, `--quiet`, etc.). This
+    /// helper merges in-place so a subcommand flag (e.g. `mise ls-remote
+    /// --prerelease`) can layer on top of those without losing them. Clears
+    /// BASE_SETTINGS so the next `Settings::get()` rebuilds with the override
+    /// applied.
+    pub fn override_with(updater: impl FnOnce(&mut SettingsPartial)) {
+        let mut lock = CLI_SETTINGS.lock().unwrap();
+        let partial = lock.get_or_insert_with(SettingsPartial::empty);
+        updater(partial);
+        drop(lock);
+        *BASE_SETTINGS.write().unwrap() = None;
+    }
+
+    pub fn lockfile_enabled(&self) -> bool {
+        self.lockfile.unwrap_or(true)
+    }
+
+    /// Returns configured lockfile platforms parsed into Platform structs, or None for defaults.
+    /// Errors on invalid platform strings (same validation as `mise lock --platform`).
+    pub fn lockfile_platforms(&self) -> Result<Option<Vec<Platform>>> {
+        match &self.lockfile_platforms {
+            Some(platforms) if !platforms.is_empty() => {
+                Ok(Some(Platform::parse_multiple(platforms)?))
+            }
+            _ => Ok(None),
+        }
+    }
+
+    pub fn force_provenance_verify(&self) -> bool {
+        self.locked_verify_provenance || self.paranoid
     }
 
     pub fn ensure_experimental(&self, what: &str) -> Result<()> {
@@ -544,7 +664,8 @@ impl Settings {
     }
 
     pub fn task_timeout_duration(&self) -> Option<Duration> {
-        self.task_timeout
+        self.task
+            .timeout
             .as_ref()
             .and_then(|s| duration::parse_duration(s).ok())
     }
@@ -554,17 +675,11 @@ impl Settings {
     }
 
     pub fn disable_tools(&self) -> BTreeSet<String> {
-        self.disable_tools
-            .iter()
-            .map(|t| t.trim().to_string())
-            .collect()
+        normalize_tool_names(&self.disable_tools)
     }
 
-    pub fn enable_tools(&self) -> BTreeSet<String> {
-        self.enable_tools
-            .iter()
-            .map(|t| t.trim().to_string())
-            .collect()
+    pub fn enable_tools(&self) -> Option<BTreeSet<String>> {
+        self.enable_tools.as_ref().map(normalize_tool_names)
     }
 
     pub fn partial_as_dict(partial: &SettingsPartial) -> eyre::Result<toml::Table> {
@@ -605,6 +720,14 @@ impl Settings {
             "x86_64" | "amd64" => "x64",
             "aarch64" | "arm64" => "arm64",
             other => other,
+        }
+    }
+
+    pub fn libc(&self) -> Option<&str> {
+        match self.libc.as_deref()?.to_ascii_lowercase().as_str() {
+            "glibc" | "gnu" => Some("gnu"),
+            "musl" => Some("musl"),
+            _ => None,
         }
     }
 
@@ -662,6 +785,90 @@ impl SettingsNode {
             .unwrap_or_else(|| DEFAULT_NODE_MIRROR_URL.to_string());
         Url::parse(&s).unwrap()
     }
+
+    pub fn ninja(&self) -> bool {
+        self.ninja.unwrap_or_else(|| which::which("ninja").is_ok())
+    }
+
+    pub fn concurrency(&self) -> Option<usize> {
+        self.concurrency
+            .map(|c| std::cmp::max(c, 1) as usize)
+            .or_else(|| {
+                if self.ninja() {
+                    None
+                } else {
+                    Some(num_cpus::get_physical())
+                }
+            })
+    }
+
+    pub fn default_packages_file(&self) -> PathBuf {
+        self.default_packages_file
+            .clone()
+            .or_else(|| {
+                env::var("NODE_DEFAULT_PACKAGES_FILE")
+                    .ok()
+                    .map(PathBuf::from)
+            })
+            .unwrap_or_else(|| {
+                let p = env::HOME.join(".default-nodejs-packages");
+                if p.exists() {
+                    return p;
+                }
+                let p = env::HOME.join(".default-node-packages");
+                if p.exists() {
+                    return p;
+                }
+                env::HOME.join(".default-npm-packages")
+            })
+    }
+
+    pub fn cflags(&self) -> Option<String> {
+        self.cflags.clone().or_else(|| env::var("NODE_CFLAGS").ok())
+    }
+
+    pub fn configure_cmd(&self, install_path: &Path) -> String {
+        let mut configure_cmd = format!("./configure --prefix={}", install_path.display());
+        if self.ninja() {
+            configure_cmd.push_str(" --ninja");
+        }
+        if let Some(opts) = self
+            .configure_opts
+            .clone()
+            .or_else(|| env::var("NODE_CONFIGURE_OPTS").ok())
+        {
+            configure_cmd.push_str(&format!(" {opts}"));
+        }
+        configure_cmd
+    }
+
+    pub fn make_cmd(&self) -> String {
+        let mut make_cmd = self.make.clone().unwrap_or_else(|| "make".into());
+        if let Some(concurrency) = self.concurrency() {
+            make_cmd.push_str(&format!(" -j{concurrency}"));
+        }
+        if let Some(opts) = self
+            .make_opts
+            .clone()
+            .or_else(|| env::var("NODE_MAKE_OPTS").ok())
+        {
+            make_cmd.push_str(&format!(" {opts}"));
+        }
+        make_cmd
+    }
+
+    pub fn make_install_cmd(&self) -> String {
+        let make = self.make.clone().unwrap_or_else(|| "make".into());
+        let mut make_install_cmd = format!("{} install", make);
+        if let Some(opts) = self
+            .make_install_opts
+            .clone()
+            .or_else(|| env::var("NODE_MAKE_INSTALL_OPTS").ok())
+        {
+            make_install_cmd.push_str(&format!(" {opts}"));
+        }
+        make_install_cmd
+    }
 }
 
 impl SettingsStatus {
@@ -704,10 +911,31 @@ where
         .map(|set| set.into_iter().collect())
 }
 
+fn normalize_tool_names(tools: &BTreeSet<String>) -> BTreeSet<String> {
+    tools
+        .iter()
+        .map(|t| t.trim())
+        .filter(|t| !t.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
 /// Parse URL replacements from JSON string format
 /// Expected format: {"source_domain": "replacement_domain", ...}
 pub fn parse_url_replacements(input: &str) -> Result<IndexMap<String, String>, serde_json::Error> {
     serde_json::from_str(input)
+}
+
+/// Parse a path list from an environment variable using the OS-native path
+/// separator (`:` on Unix, `;` on Windows). This correctly handles Windows
+/// absolute paths whose drive letters contain `:` (e.g. `C:\foo`).
+fn list_by_os_path_separator<C>(input: &str) -> Result<C, std::convert::Infallible>
+where
+    C: FromIterator<PathBuf>,
+{
+    Ok(std::env::split_paths(input)
+        .filter(|p| !p.as_os_str().is_empty())
+        .collect())
 }
 
 #[cfg(test)]
@@ -784,6 +1012,18 @@ mod tests {
     }
 
     #[test]
+    fn test_normalize_tool_names() {
+        let tools = BTreeSet::from([
+            " node ".to_string(),
+            "  ".to_string(),
+            "ruby".to_string(),
+            "".to_string(),
+        ]);
+        let expected = BTreeSet::from(["node".to_string(), "ruby".to_string()]);
+        assert_eq!(normalize_tool_names(&tools), expected);
+    }
+
+    #[test]
     fn test_offline_default_is_false() {
         Settings::reset(None);
         let settings = Settings::get();
@@ -833,6 +1073,16 @@ mod tests {
     }
 
     #[test]
+    fn test_install_before_hidden_alias_sets_minimum_release_age() {
+        let mut partial = SettingsPartial::empty();
+        partial.install_before = Some("7d".to_string());
+        Settings::reset(Some(partial));
+        let settings = Settings::get();
+        assert_eq!(settings.minimum_release_age.as_deref(), Some("7d"));
+        Settings::reset(None);
+    }
+
+    #[test]
     fn test_settings_toml_is_sorted() {
         let content =
             std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/settings.toml"))
@@ -870,5 +1120,86 @@ mod tests {
                 "settings.toml is not alphabetically sorted at index {i}: found \"{got}\", expected \"{expected}\". Run the sort script or reorder manually."
             );
         }
+    }
+
+    #[test]
+    fn test_settings_node_build_cmds() {
+        let node = SettingsNode::default();
+        let path = Path::new("/tmp/install");
+
+        // Defaults
+        assert!(
+            node.configure_cmd(path)
+                .starts_with("./configure --prefix=/tmp/install")
+        );
+        assert!(node.make_cmd().starts_with("make"));
+        assert_eq!(node.make_install_cmd(), "make install");
+    }
+
+    #[test]
+    fn test_settings_node_build_cmds_with_opts() {
+        let node = SettingsNode {
+            configure_opts: Some("--verbose".to_string()),
+            make_opts: Some("-s".to_string()),
+            make_install_opts: Some("--no-strip".to_string()),
+            make: Some("gmake".to_string()),
+            concurrency: Some(4),
+            ..Default::default()
+        };
+
+        let path = Path::new("/tmp/install");
+        assert!(node.configure_cmd(path).contains("--verbose"));
+        assert!(node.make_cmd().starts_with("gmake -j4 -s"));
+        assert_eq!(node.make_install_cmd(), "gmake install --no-strip");
+    }
+
+    #[test]
+    fn test_list_by_os_path_separator_empty() {
+        let result: Result<Vec<PathBuf>, _> = list_by_os_path_separator("");
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_list_by_os_path_separator_single() {
+        #[cfg(not(windows))]
+        let (input, expected) = ("/foo/bar", PathBuf::from("/foo/bar"));
+        #[cfg(windows)]
+        let (input, expected) = (r"C:\foo\bar", PathBuf::from(r"C:\foo\bar"));
+        let result: Vec<PathBuf> = list_by_os_path_separator(input).unwrap();
+        assert_eq!(result, vec![expected]);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_list_by_os_path_separator_multiple_unix() {
+        let result: Vec<PathBuf> = list_by_os_path_separator("/foo:/bar").unwrap();
+        assert_eq!(result, vec![PathBuf::from("/foo"), PathBuf::from("/bar")]);
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn test_list_by_os_path_separator_multiple_windows() {
+        let result: Vec<PathBuf> = list_by_os_path_separator(r"C:\foo;D:\bar").unwrap();
+        assert_eq!(
+            result,
+            vec![PathBuf::from(r"C:\foo"), PathBuf::from(r"D:\bar")]
+        );
+    }
+
+    #[test]
+    fn test_list_by_os_path_separator_as_btreeset() {
+        // Verify the function works with BTreeSet as the collection type,
+        // matching the field types used in Settings (e.g. trusted_config_paths).
+        #[cfg(not(windows))]
+        let (input, a, b) = ("/foo:/bar", PathBuf::from("/foo"), PathBuf::from("/bar"));
+        #[cfg(windows)]
+        let (input, a, b) = (
+            r"C:\foo;D:\bar",
+            PathBuf::from(r"C:\foo"),
+            PathBuf::from(r"D:\bar"),
+        );
+        let result: BTreeSet<PathBuf> = list_by_os_path_separator(input).unwrap();
+        assert_eq!(result, [a, b].into_iter().collect());
     }
 }

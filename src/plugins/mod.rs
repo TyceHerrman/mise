@@ -98,6 +98,14 @@ impl PluginEnum {
         }
     }
 
+    pub fn remote_sha(&self) -> eyre::Result<Option<String>> {
+        match self {
+            PluginEnum::Asdf(plugin) => plugin.remote_sha(),
+            PluginEnum::Vfox(plugin) => plugin.remote_sha(),
+            PluginEnum::VfoxBackend(plugin) => plugin.remote_sha(),
+        }
+    }
+
     pub fn external_commands(&self) -> eyre::Result<Vec<Command>> {
         match self {
             PluginEnum::Asdf(plugin) => plugin.external_commands(),
@@ -181,6 +189,33 @@ impl PluginType {
         }
     }
 
+    pub fn from_plugin_config(key: &str) -> (Self, &str) {
+        if let Some(name) = key.strip_prefix("vfox:") {
+            (Self::Vfox, name)
+        } else if let Some(name) = key.strip_prefix("vfox-backend:") {
+            (Self::VfoxBackend, name)
+        } else if let Some(name) = key.strip_prefix("asdf:") {
+            (Self::Asdf, name)
+        } else {
+            let path = dirs::PLUGINS.join(key.to_kebab_case());
+            (Self::from_plugin_path(&path).unwrap_or(Self::Asdf), key)
+        }
+    }
+
+    pub fn from_plugin_path(path: &Path) -> Option<Self> {
+        if path.join("metadata.lua").exists() {
+            if path.join("hooks").join("backend_install.lua").exists() {
+                Some(Self::VfoxBackend)
+            } else {
+                Some(Self::Vfox)
+            }
+        } else if path.join("bin").join("list-all").exists() {
+            Some(Self::Asdf)
+        } else {
+            None
+        }
+    }
+
     pub fn plugin(&self, short: String) -> PluginEnum {
         let path = dirs::PLUGINS.join(short.to_kebab_case());
         match self {
@@ -208,10 +243,25 @@ pub fn warn_if_env_plugin_shadows_registry(name: &str, plugin_path: &Path) {
 
 pub static VERSION_REGEX: Lazy<regex::Regex> = Lazy::new(|| {
     Regex::new(
-        r"(?i)(^Available versions:|-src|-dev|-latest|-stm|[-\\.]rc|-milestone|-alpha|-beta|[-\\.]pre|-next|-test|([abc])[0-9]+|snapshot|SNAPSHOT|master)"
+        r"(?i)(^Available versions:|-src|[-\\.]dev|-latest|-stm|[-\\.]rc|-milestone|-alpha|-beta|[-\\.]pre|-next|-test|-nightly|-canary|-experimental|-insider|-edge|snapshot|SNAPSHOT|master)"
     )
         .unwrap()
 });
+
+/// PEP 440 separator-less pre-release segment, grounded in the canonical
+/// public version grammar:
+///
+/// > `[N!]N(.N)*[{a|b|rc}N][.postN][.devN]`
+///
+/// The pre-release segment (`{a|b|rc}N`) must follow the release segment, so
+/// the regex requires a leading digit. `c` is included as PEP 440's recognized
+/// alternate spelling for `rc`. The trailing boundary `(?:$|[^a-z0-9])` keeps
+/// it from matching inside hex hashes or other identifiers.
+///
+/// Only consulted by Python-flavored backends (currently `pipx`); other
+/// backends would false-positive on hex hashes like `f149714c1d54`.
+pub static PEP440_PRERELEASE_REGEX: Lazy<regex::Regex> =
+    Lazy::new(|| Regex::new(r"(?i)[0-9](?:a|b|c|rc)[0-9]+(?:$|[^a-z0-9])").unwrap());
 
 pub fn get(short: &str) -> Result<PluginEnum> {
     let (name, full) = short.split_once(':').unwrap_or((short, short));
@@ -246,6 +296,9 @@ pub trait Plugin: Debug + Send {
     fn set_remote_url(&self, url: String) {}
     fn current_abbrev_ref(&self) -> eyre::Result<Option<String>>;
     fn current_sha_short(&self) -> eyre::Result<Option<String>>;
+    fn remote_sha(&self) -> eyre::Result<Option<String>> {
+        Ok(None)
+    }
     fn is_installed(&self) -> bool {
         true
     }
@@ -414,5 +467,152 @@ mod tests {
             PluginSource::Git { .. } => {}
             _ => panic!("Expected a git plugin"),
         }
+    }
+
+    #[test]
+    fn test_plugin_type_from_plugin_config() {
+        assert_eq!(
+            PluginType::from_plugin_config("vfox:node"),
+            (PluginType::Vfox, "node")
+        );
+        assert_eq!(
+            PluginType::from_plugin_config("vfox-backend:npm"),
+            (PluginType::VfoxBackend, "npm")
+        );
+        assert_eq!(
+            PluginType::from_plugin_config("asdf:node"),
+            (PluginType::Asdf, "node")
+        );
+        assert_eq!(
+            PluginType::from_plugin_config("missing-test-plugin"),
+            (PluginType::Asdf, "missing-test-plugin")
+        );
+    }
+
+    #[test]
+    fn test_plugin_type_from_plugin_path() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(PluginType::from_plugin_path(dir.path()), None);
+
+        let asdf = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(asdf.path().join("bin")).unwrap();
+        std::fs::write(asdf.path().join("bin").join("list-all"), "").unwrap();
+        assert_eq!(
+            PluginType::from_plugin_path(asdf.path()),
+            Some(PluginType::Asdf)
+        );
+
+        let vfox = tempfile::tempdir().unwrap();
+        std::fs::write(vfox.path().join("metadata.lua"), "").unwrap();
+        assert_eq!(
+            PluginType::from_plugin_path(vfox.path()),
+            Some(PluginType::Vfox)
+        );
+
+        let backend = tempfile::tempdir().unwrap();
+        std::fs::write(backend.path().join("metadata.lua"), "").unwrap();
+        std::fs::create_dir_all(backend.path().join("hooks")).unwrap();
+        std::fs::write(backend.path().join("hooks").join("backend_install.lua"), "").unwrap();
+        assert_eq!(
+            PluginType::from_plugin_path(backend.path()),
+            Some(PluginType::VfoxBackend)
+        );
+    }
+
+    #[test]
+    fn test_version_regex_filters_prerelease() {
+        // Standard pre-release patterns
+        assert!(VERSION_REGEX.is_match("1.0.0-alpha"));
+        assert!(VERSION_REGEX.is_match("1.0.0-beta"));
+        assert!(VERSION_REGEX.is_match("1.0.0-rc1"));
+        assert!(VERSION_REGEX.is_match("1.0.0.rc1"));
+        assert!(VERSION_REGEX.is_match("1.0.0-dev"));
+        assert!(VERSION_REGEX.is_match("1.0.0-pre1"));
+        assert!(VERSION_REGEX.is_match("1.0.0.pre1"));
+
+        // PEP 440 dot-separated dev versions (GitHub discussion #8784)
+        assert!(
+            VERSION_REGEX.is_match("2026.3.3.dev0"),
+            "PEP 440 .dev suffix should be filtered"
+        );
+        assert!(
+            VERSION_REGEX.is_match("2026.3.3.162408.dev0"),
+            "PEP 440 .dev suffix with build number should be filtered"
+        );
+
+        // npm prerelease channels (GitHub discussion #9503).
+        // Use suffixes that don't accidentally match `([abc])[0-9]+`, so each
+        // assertion exercises only the channel-tag alternative it names.
+        assert!(
+            VERSION_REGEX.is_match("0.42.0-nightly.20260429.g6d9911393"),
+            "npm -nightly tag should be filtered"
+        );
+        assert!(
+            VERSION_REGEX.is_match("13.0.0-canary"),
+            "npm -canary tag should be filtered"
+        );
+        assert!(
+            VERSION_REGEX.is_match("18.0.0-experimental.1"),
+            "npm -experimental tag should be filtered"
+        );
+        assert!(
+            VERSION_REGEX.is_match("1.99.0-insider"),
+            "npm -insider tag should be filtered"
+        );
+        assert!(
+            VERSION_REGEX.is_match("1.99.0-edge"),
+            "npm -edge tag should be filtered"
+        );
+
+        // Stable versions should NOT match
+        assert!(!VERSION_REGEX.is_match("1.0.0"));
+        assert!(!VERSION_REGEX.is_match("2026.3.3"));
+        assert!(!VERSION_REGEX.is_match("22.6.0"));
+
+        // PEP 440 separator-less suffixes (`3.12.0a1`, `1.2.3c1`) live in
+        // PEP440_PRERELEASE_REGEX, not the general regex — see that test below.
+        assert!(!VERSION_REGEX.is_match("3.12.0a1"));
+        assert!(!VERSION_REGEX.is_match("1.2.3c1"));
+
+        // Go pseudo-versions and other identifiers with incidental `[abc]\d`
+        // substrings (commit hashes) must not be flagged.
+        assert!(!VERSION_REGEX.is_match("2.0.0-20260404020628-f149714c1d54"));
+    }
+
+    #[test]
+    fn test_pep440_prerelease_regex() {
+        // Canonical PEP 440 pre-release segments: `aN`, `bN`, `rcN`, plus the
+        // recognized `cN` alias for `rcN`.
+        assert!(PEP440_PRERELEASE_REGEX.is_match("3.12.0a1"));
+        assert!(PEP440_PRERELEASE_REGEX.is_match("3.12.0b2"));
+        assert!(PEP440_PRERELEASE_REGEX.is_match("1.2.3c1"));
+        assert!(PEP440_PRERELEASE_REGEX.is_match("1.2.3rc1"));
+        assert!(PEP440_PRERELEASE_REGEX.is_match("1.0.0c1+build"));
+        assert!(PEP440_PRERELEASE_REGEX.is_match("1.0.0a1.dev0"));
+
+        // Stable releases — including `.postN`, which PEP 440 specifies as a
+        // post-release (after a stable), NOT a pre-release.
+        assert!(!PEP440_PRERELEASE_REGEX.is_match("1.0.0"));
+        assert!(!PEP440_PRERELEASE_REGEX.is_match("3.12.0"));
+        assert!(!PEP440_PRERELEASE_REGEX.is_match("1.0.0.post1"));
+
+        // The `{a|b|rc}N` segment must follow the release segment per the
+        // PEP 440 grammar — the leading-digit anchor enforces that. Identifiers
+        // whose hex hashes happen to contain `c1` / `a1` / `b2` substrings
+        // (e.g. Go pseudo-versions) do not match because the `[abc]` is
+        // preceded by a hex letter, not a digit.
+        assert!(
+            !PEP440_PRERELEASE_REGEX.is_match("2.0.0-20260404020628-f149714c1d54"),
+            "Go pseudo-version with `c1` in hash should not match"
+        );
+        assert!(
+            !PEP440_PRERELEASE_REGEX.is_match("1.0.0-20240101000000-a1b2c3d4e5f6"),
+            "Go pseudo-version with `a1`/`b2`/`c3` in hash should not match"
+        );
+
+        // Bare `aN` / `bN` / `cN` not attached to a release segment (uncommon
+        // but possible identifier shapes) is also rejected.
+        assert!(!PEP440_PRERELEASE_REGEX.is_match("a1"));
+        assert!(!PEP440_PRERELEASE_REGEX.is_match("b1234567"));
     }
 }

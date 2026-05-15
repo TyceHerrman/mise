@@ -8,6 +8,7 @@ use crate::config::Config;
 use crate::file::display_path;
 use crate::task::Task;
 use crate::task::task_fetcher::TaskFetcher;
+use crate::task::task_source_checker::task_cwd;
 use crate::ui::info;
 
 /// Get information about a task
@@ -78,6 +79,9 @@ impl TasksInfo {
         if task.raw {
             properties.push("raw");
         }
+        if task.interactive {
+            properties.push("interactive");
+        }
         if !properties.is_empty() {
             info::inline_section("Properties", properties.join(", "))?;
         }
@@ -93,7 +97,8 @@ impl TasksInfo {
         if !task.sources.is_empty() {
             info::inline_section("Sources", task.sources.join(", "))?;
         }
-        let outputs = task.outputs.paths(task);
+        let root = task_cwd(task, config).await?;
+        let outputs = task.outputs.paths(task, &root);
         if !outputs.is_empty() {
             info::inline_section("Outputs", outputs.join(", "))?;
         }
@@ -104,11 +109,12 @@ impl TasksInfo {
         if !run.is_empty() {
             info::section("Run", run.iter().map(|e| e.to_string()).join("\n"))?;
         }
-        if !task.env.is_empty() {
+        if !task.env.is_empty() || !task.overlay_env.is_empty() {
             let env_display = task
                 .env
                 .0
                 .iter()
+                .chain(task.overlay_env.iter().map(|(d, _)| d))
                 .map(|directive| directive.to_string())
                 .collect::<Vec<_>>()
                 .join("\n");
@@ -123,6 +129,10 @@ impl TasksInfo {
 
     async fn display_json(&self, config: &Arc<Config>, task: &Task) -> Result<()> {
         let spec = task.parse_usage_spec_for_display(config).await?;
+        let resolved_dir = task
+            .dir(config)
+            .await?
+            .map(|p| p.to_string_lossy().to_string());
         let o = json!({
             "name": task.display_name,
             "aliases": task.aliases,
@@ -131,10 +141,17 @@ impl TasksInfo {
             "depends": task.depends,
             "depends_post": task.depends_post,
             "wait_for": task.wait_for,
-            "env": task.env.0.iter().map(|d| d.to_string()).collect::<Vec<_>>(),
-            "dir": task.dir,
+            "env": task
+                .env
+                .0
+                .iter()
+                .chain(task.overlay_env.iter().map(|(d, _)| d))
+                .map(|d| d.to_string())
+                .collect::<Vec<_>>(),
+            "dir": resolved_dir,
             "hide": task.hide,
             "raw": task.raw,
+            "interactive": task.interactive,
             "sources": task.sources,
             "outputs": task.outputs,
             "shell": task.shell,

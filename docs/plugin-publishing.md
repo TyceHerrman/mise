@@ -202,7 +202,7 @@ mise use my-plugin@latest
 
 # Test in different environments
 docker run --rm -it ubuntu:latest bash -c "
-    curl -fsSL https://mise.jdx.dev/install.sh | sh
+    curl -fsSL https://mise.en.dev/install.sh | sh
     mise plugin install my-plugin https://github.com/username/my-plugin
     mise install my-plugin@latest
 "
@@ -252,7 +252,7 @@ Create a GitHub release for better discoverability:
 
 ### 4. Release Notes Template
 
-```markdown
+````markdown
 ## Changes in v1.2.3
 
 ### Added
@@ -275,7 +275,7 @@ Create a GitHub release for better discoverability:
 ```bash
 mise plugin install my-plugin https://github.com/username/my-plugin
 ```
-```
+````
 
 ## Distribution Methods
 

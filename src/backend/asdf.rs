@@ -7,6 +7,7 @@ use std::{collections::BTreeMap, sync::Arc};
 use crate::backend::VersionInfo;
 use crate::backend::backend_type::BackendType;
 use crate::backend::external_plugin_cache::ExternalPluginCache;
+use crate::backend::normalize_idiomatic_contents;
 use crate::cache::{CacheManager, CacheManagerBuilder};
 use crate::cli::args::BackendArg;
 use crate::config::{Config, Settings};
@@ -169,13 +170,13 @@ impl AsdfBackend {
         tv: &ToolVersion,
     ) -> Result<ScriptManager> {
         let mut sm = self.plugin.script_man.clone();
-        for (key, value) in tv.request.options().opts {
+        for (key, value) in tv.request.options().opts_as_strings() {
             let k = format!("RTX_TOOL_OPTS__{}", key.to_uppercase());
             sm = sm.with_env(k, value.clone());
             let k = format!("MISE_TOOL_OPTS__{}", key.to_uppercase());
-            sm = sm.with_env(k, value.clone());
+            sm = sm.with_env(k, value);
         }
-        for (key, value) in tv.request.options().install_env {
+        for (key, value) in tv.request.options().core.install_env {
             sm = sm.with_env(key, value.clone());
         }
         if let Some(project_root) = &config.project_root {
@@ -247,6 +248,10 @@ impl Backend for AsdfBackend {
         Some(PluginType::Asdf)
     }
 
+    fn mark_prereleases_from_version_pattern(&self) -> bool {
+        true
+    }
+
     /// ASDF plugins handle their own downloads through plugin scripts.
     /// Lockfile URLs are not applicable since installation is delegated to plugin scripts.
     fn supports_lockfile_url(&self) -> bool {
@@ -264,11 +269,11 @@ impl Backend for AsdfBackend {
             .collect())
     }
 
-    async fn latest_stable_version(&self, config: &Arc<Config>) -> Result<Option<String>> {
+    async fn latest_stable_version(&self, _config: &Arc<Config>) -> Result<Option<String>> {
         timeout::run_with_timeout_async(
             || async {
                 if !self.plugin.has_latest_stable_script() {
-                    return self.latest_version(config, Some("latest".into())).await;
+                    return Ok(None);
                 }
                 self.latest_stable_cache
                     .get_or_try_init(|| self.plugin.fetch_latest_stable())
@@ -307,7 +312,7 @@ impl Backend for AsdfBackend {
         Ok(aliases)
     }
 
-    async fn idiomatic_filenames(&self) -> Result<Vec<String>> {
+    async fn _idiomatic_filenames(&self) -> Result<Vec<String>> {
         if let Some(data) = &self.toml.list_idiomatic_filenames.data {
             return Ok(self.plugin.parse_idiomatic_filenames(data));
         }
@@ -325,9 +330,9 @@ impl Backend for AsdfBackend {
             .cloned()
     }
 
-    async fn parse_idiomatic_file(&self, idiomatic_file: &Path) -> Result<String> {
+    async fn _parse_idiomatic_file(&self, idiomatic_file: &Path) -> Result<Vec<String>> {
         if let Some(cached) = self.fetch_cached_idiomatic_file(idiomatic_file)? {
-            return Ok(cached);
+            return Ok(cached.split_whitespace().map(|s| s.to_string()).collect());
         }
         trace!(
             "parsing idiomatic file: {}",
@@ -338,11 +343,17 @@ impl Backend for AsdfBackend {
             true => self.plugin.script_man.read(&script)?,
             false => fs::read_to_string(idiomatic_file)?,
         }
-        .trim()
         .to_string();
+        let idiomatic_version = normalize_idiomatic_contents(&idiomatic_version);
 
         self.write_idiomatic_cache(idiomatic_file, &idiomatic_version)?;
-        Ok(idiomatic_version)
+        if idiomatic_version.is_empty() {
+            return Ok(vec![]);
+        }
+        Ok(idiomatic_version
+            .split_whitespace()
+            .map(|s| s.to_string())
+            .collect())
     }
 
     fn plugin(&self) -> Option<&PluginEnum> {
@@ -384,6 +395,7 @@ impl Backend for AsdfBackend {
     }
 
     async fn list_bin_paths(&self, config: &Arc<Config>, tv: &ToolVersion) -> Result<Vec<PathBuf>> {
+        let runtime_path = tv.runtime_path();
         Ok(self
             .cache
             .list_bin_paths(config, self, tv, async || {
@@ -391,7 +403,7 @@ impl Backend for AsdfBackend {
             })
             .await?
             .into_iter()
-            .map(|path| tv.install_path().join(path))
+            .map(|path| runtime_path.join(path))
             .collect())
     }
 

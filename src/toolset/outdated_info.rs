@@ -2,15 +2,17 @@ use crate::semver::{chunkify_version, split_version_prefix};
 use crate::toolset;
 use crate::toolset::{ResolveOptions, ToolRequest, ToolSource, ToolVersion};
 use crate::{Result, config::Config};
-use serde_derive::Serialize;
+use serde::Serialize;
 use std::{
+    collections::BTreeSet,
     fmt::{Display, Formatter},
+    path::PathBuf,
     sync::Arc,
 };
 use tabled::Tabled;
 use versions::Version;
 
-#[derive(Debug, Serialize, Clone, Tabled)]
+#[derive(Debug, Serialize, Clone, Tabled, PartialEq, Eq, Hash)]
 pub struct OutdatedInfo {
     pub name: String,
     #[serde(skip)]
@@ -57,16 +59,14 @@ impl OutdatedInfo {
     ) -> eyre::Result<Option<Self>> {
         let t = tv.backend()?;
         // prefix is something like "temurin-" or "corretto-"
-        let (prefix, _) = split_version_prefix(&tv.request.version());
-        let latest_result = if bump {
-            // Note: Backend's latest_version_with_opts takes individual parameters,
-            // not a ResolveOptions struct like ToolVersion's method
-            t.latest_version_with_opts(
-                config,
-                Some(prefix.clone()).filter(|s| !s.is_empty()),
-                opts.before_date,
-            )
-            .await
+        let (prefix, prefix_version) = split_version_prefix(&tv.request.version());
+        let use_backend_latest =
+            bump || (opts.inactive && tv.request.source() == &ToolSource::Unknown);
+
+        let latest_result = if use_backend_latest {
+            let prefix = prefixed_latest_query(&prefix, &prefix_version);
+            // For bumps and installed-but-inactive tools (`--no-source`), use backend latest.
+            t.latest_version(config, prefix, opts.before_date).await
         } else {
             tv.latest_version_with_opts(config, opts)
                 .await
@@ -84,6 +84,15 @@ impl OutdatedInfo {
             }
         };
         let mut oi = Self::new(config, tv, latest)?;
+        if opts.inactive && oi.source == ToolSource::Unknown {
+            // Installed-but-inactive tools have no config source, so their request
+            // is usually pinned to the currently installed version. With --no-source we
+            // want to install the discovered latest version instead.
+            let backend = oi.tool_request.ba().clone();
+            let source = oi.tool_request.source().clone();
+            let options = oi.tool_request.options();
+            oi.tool_request = ToolRequest::new_opts(backend, &oi.latest, options, source)?;
+        }
         if oi
             .current
             .as_ref()
@@ -181,11 +190,26 @@ impl Display for OutdatedInfo {
     }
 }
 
+fn prefixed_latest_query(prefix: &str, prefix_version: &str) -> Option<String> {
+    let prefix = prefix.trim();
+    if prefix.is_empty() || prefix_version.is_empty() || prefix.contains(':') {
+        return None;
+    }
+
+    let query_version = chunkify_version(prefix_version)
+        .into_iter()
+        .next()
+        .filter(|version| !version.is_empty())
+        .unwrap_or_else(|| prefix_version.to_string());
+
+    Some(format!("{prefix}{query_version}"))
+}
+
 /// check if the new version is a bump from the old version and return the new version
 /// at the same specificity level as the old version
 /// used with `mise outdated --bump` to determine what new semver range to use
 /// given old: "20" and new: "21.2.3", return Some("21")
-fn check_semver_bump(old: &str, new: &str) -> Option<String> {
+pub fn check_semver_bump(old: &str, new: &str) -> Option<String> {
     // Preserve known channel names as-is
     const CHANNEL_NAMES: &[&str] = &[
         "latest", "nightly", "stable", "beta", "dev", "canary", "edge", "lts",
@@ -225,6 +249,126 @@ fn check_semver_bump(old: &str, new: &str) -> Option<String> {
     }
 }
 
+/// Represents a config file update needed when a CLI-specified version doesn't match
+/// the current config prefix.
+pub struct ConfigBump {
+    pub tool_name: String,
+    pub config_path: std::path::PathBuf,
+    pub old_version: String,
+    pub new_version: String,
+    pub new_request: ToolRequest,
+}
+
+/// Compute config bumps needed when CLI-specified versions don't match current config prefixes.
+/// Returns a list of bumps to apply (or preview in dry-run mode).
+pub fn compute_config_bumps(
+    config: &Config,
+    tool_versions: &[(&str, &str)], // (tool_short_name, cli_version)
+) -> Vec<ConfigBump> {
+    let config_paths = config.config_files.keys().cloned().collect();
+    compute_config_bumps_for_paths(config, tool_versions, &config_paths)
+}
+
+/// Compute config bumps against a bounded set of config paths.
+///
+/// This lets callers that intentionally target a subset of the loaded config
+/// hierarchy avoid updating shadowed parent configs.
+pub fn compute_config_bumps_for_paths(
+    config: &Config,
+    tool_versions: &[(&str, &str)], // (tool_short_name, cli_version)
+    config_paths: &BTreeSet<PathBuf>,
+) -> Vec<ConfigBump> {
+    let mut bumps = Vec::new();
+
+    for &(tool_name, cli_version) in tool_versions {
+        for (path, cf) in config.config_files.iter() {
+            if !config_paths.contains(path) {
+                continue;
+            }
+            if crate::config::is_global_config(path) {
+                continue;
+            }
+            let Ok(trs) = cf.to_tool_request_set() else {
+                continue;
+            };
+
+            // Find the tool by short name in this config file
+            let matching = trs.tools.iter().find(|(ba, _)| ba.short == tool_name);
+            let Some((_ba, requests)) = matching else {
+                continue;
+            };
+            if requests.len() != 1 {
+                continue;
+            }
+
+            let current_version = requests[0].version();
+            let (prefix, _) = split_version_prefix(&current_version);
+            let old = current_version
+                .strip_prefix(&prefix)
+                .unwrap_or(&current_version);
+
+            if let Some(bumped) = check_semver_bump(old, cli_version)
+                && bumped != old
+            {
+                let new_version = format!("{prefix}{bumped}");
+                let new_request = match requests[0].clone() {
+                    ToolRequest::Version {
+                        version: _,
+                        backend,
+                        options,
+                        source,
+                    } => ToolRequest::Version {
+                        version: new_version.clone(),
+                        backend,
+                        options,
+                        source,
+                    },
+                    ToolRequest::Prefix {
+                        prefix: _,
+                        backend,
+                        options,
+                        source,
+                    } => ToolRequest::Prefix {
+                        prefix: format!("{prefix}{bumped}"),
+                        backend,
+                        options,
+                        source,
+                    },
+                    other => other,
+                };
+                bumps.push(ConfigBump {
+                    tool_name: tool_name.to_string(),
+                    config_path: path.clone(),
+                    old_version: current_version.to_string(),
+                    new_version,
+                    new_request,
+                });
+            }
+            break;
+        }
+    }
+
+    bumps
+}
+
+/// Apply config bumps by writing the new versions to their config files.
+pub fn apply_config_bumps(config: &Config, bumps: &[ConfigBump]) -> Result<()> {
+    for bump in bumps {
+        let Some(cf) = config.config_files.get(&bump.config_path) else {
+            continue;
+        };
+        let Ok(trs) = cf.to_tool_request_set() else {
+            continue;
+        };
+        let Some((ba, _)) = trs.tools.iter().find(|(ba, _)| ba.short == bump.tool_name) else {
+            continue;
+        };
+        cf.replace_versions(ba, vec![bump.new_request.clone()])?;
+        cf.save()?;
+    }
+    Ok(())
+}
+
 pub fn is_outdated_version(current: &str, latest: &str) -> bool {
     if let (Some(c), Some(l)) = (Version::new(current), Version::new(latest)) {
         c.lt(&l)
@@ -238,7 +382,7 @@ mod tests {
     use pretty_assertions::assert_eq;
     use test_log::test;
 
-    use super::{check_semver_bump, is_outdated_version};
+    use super::{check_semver_bump, is_outdated_version, prefixed_latest_query};
 
     #[test]
     fn test_is_outdated_version() {
@@ -315,5 +459,24 @@ mod tests {
             check_semver_bump("beta", "1.0.0-beta.1"),
             Some("beta".to_string())
         );
+    }
+
+    #[test]
+    fn test_prefixed_latest_query() {
+        assert_eq!(
+            prefixed_latest_query("temurin-", "17.0.7+7"),
+            Some("temurin-17".to_string())
+        );
+        assert_eq!(
+            prefixed_latest_query("temurin-", "17-ea"),
+            Some("temurin-17".to_string())
+        );
+        assert_eq!(
+            prefixed_latest_query("corretto-", "2024-09-16"),
+            Some("corretto-2024".to_string())
+        );
+        assert_eq!(prefixed_latest_query("prefix:1.", "24"), None);
+        assert_eq!(prefixed_latest_query("", "17.0.7"), None);
+        assert_eq!(prefixed_latest_query("temurin-", ""), None);
     }
 }

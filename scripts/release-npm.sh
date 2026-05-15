@@ -41,7 +41,7 @@ for platform in "${platforms[@]}"; do
 {
   "name": "$NPM_PREFIX-$os-$arch",
   "version": "$MISE_VERSION",
-  "description": "polyglot runtime manager",
+  "description": "Dev tools, env vars, and tasks in one CLI",
   "bin": {
     "mise": "bin/mise"
   },
@@ -60,13 +60,14 @@ for platform in "${platforms[@]}"; do
 EOF
 	pushd "$RELEASE_DIR/npm"
 	tree || true
+	aube_publish_args=(--access public --tag "$dist_tag" --provenance --no-git-checks)
 	if [ "${DRY_RUN:-1}" != "0" ]; then
 		echo DRY_RUN
-		echo npm publish --access public --tag "$dist_tag" --provenance
+		echo aube publish "${aube_publish_args[@]}"
 		echo DRY_RUN
 	else
-		if ! npm publish --access public --tag "$dist_tag" --provenance 2>&1 | tee /tmp/npm-publish.log; then
-			if grep -q "You cannot publish over the previously published versions" /tmp/npm-publish.log; then
+		if ! aube publish "${aube_publish_args[@]}" 2>&1 | tee /tmp/npm-publish.log; then
+			if grep -qE "already (on|published)|previously published" /tmp/npm-publish.log; then
 				echo "Version already published, skipping..."
 			else
 				cat /tmp/npm-publish.log
@@ -140,7 +141,7 @@ EOF
 cat <<EOF >"$RELEASE_DIR/npm/package.json"
 {
   "name": "$NPM_PREFIX",
-  "description": "polyglot runtime manager",
+  "description": "Dev tools, env vars, and tasks in one CLI",
   "version": "$MISE_VERSION",
   "repository": {
     "type": "git",
@@ -164,13 +165,14 @@ cat <<EOF >"$RELEASE_DIR/npm/package.json"
 }
 EOF
 pushd "$RELEASE_DIR/npm"
+aube_publish_args=(--access public --tag "$dist_tag" --provenance --no-git-checks)
 if [ "${DRY_RUN:-1}" != "0" ]; then
 	echo DRY_RUN
-	echo npm publish --access public --tag "$dist_tag" --provenance
+	echo aube publish "${aube_publish_args[@]}"
 	echo DRY_RUN
 else
-	if ! npm publish --access public --tag "$dist_tag" --provenance 2>&1 | tee /tmp/npm-publish.log; then
-		if grep -q "You cannot publish over the previously published versions" /tmp/npm-publish.log; then
+	if ! aube publish "${aube_publish_args[@]}" 2>&1 | tee /tmp/npm-publish.log; then
+		if grep -qE "already (on|published)|previously published" /tmp/npm-publish.log; then
 			echo "Version already published, skipping..."
 		else
 			cat /tmp/npm-publish.log

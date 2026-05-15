@@ -131,18 +131,21 @@ $ mise set NODE_ENV=production  # writes to mise.toml
 
 :::
 
-Here is what a `mise.toml` looks like:
+Here is what a typical `mise.toml` looks like:
 
 ```toml
-[env]
-NODE_ENV = 'production'
-
 [tools]
-terraform = '1.0.0'
-erlang = '24.0'
+node = '24'
+python = '3.12'
 
-[tasks.build]
-run = 'echo "running build tasks"'
+[env]
+NODE_ENV = 'development'
+
+[tasks.dev]
+run = 'npm run dev'
+
+[tasks.test]
+run = 'pytest'
 ```
 
 `mise.toml` files are hierarchical. The configuration in a file in the current directory will
@@ -174,6 +177,7 @@ You can also have environment specific config files like `.mise.production.toml`
 See [Tools](/dev-tools/). In addition to specifying versions, each tool entry can include options such as:
 
 - `os`: Restrict installation to certain operating systems
+- `depends`: Install order relative to other tools in this config only; vfox plugin hook dependencies belong in plugin `metadata.lua` (see [Tool Dependencies](/dev-tools/#tool-dependencies))
 - `install_env`: Environment vars used during install
 - `postinstall`: Command to run after installation completes for that specific tool
 
@@ -208,16 +212,16 @@ node = "https://github.com/my-org/mise-node.git#DEADBEEF" # supports specific gi
 "vfox-backend:myplugin" = "https://github.com/jdx/vfox-npm"
 ```
 
-The plugin type prefix (e.g., `asdf:`, `vfox:` or `vfox-backend:`) is optional. If omitted, mise will fall back to
-either using `asdf` or `vfox` if the URL contains `vfox-` in the repo name.
+The plugin type prefix (e.g., `asdf:`, `vfox:` or `vfox-backend:`) is optional.
+If omitted, mise clones the plugin first and then detects the plugin type from
+the installed plugin files.
 
 If you simply want to install a plugin from a specific URL once, it's better to use
 `mise plugin install <NAME> <GIT_URL>`. Add this section to `mise.toml` if you want
 to share the plugin location/revision with other developers in your project.
 
-This is similar
-to [`MISE_SHORTHANDS`](https://github.com/jdx/mise#mise_shorthands_fileconfigmiseshorthandstoml)
-but doesn't require a separate file.
+This replaces the deprecated `settings.shorthands_file` / `MISE_SHORTHANDS_FILE` mechanism: put the
+same `shortname = "backend-or-url"` entries under `[plugins]` instead of a separate TOML file.
 
 ### `[tool_alias]` - Tool version aliases
 
@@ -295,9 +299,9 @@ See [Monorepo Tasks](/tasks/monorepo) for detailed usage and examples.
 
 ### `mise.toml` schema
 
-- You can find the JSON schema for `mise.toml` in [schema/mise.json](https://github.com/jdx/mise/blob/main/schema/mise.json) or at <https://mise.jdx.dev/schema/mise.json>.
+- You can find the JSON schema for `mise.toml` in [schema/mise.json](https://github.com/jdx/mise/blob/main/schema/mise.json) or at <https://mise.en.dev/schema/mise.json>.
 - Some editors can load it automatically to provide autocompletion and validation for when editing a `mise.toml` file ([VSCode](https://code.visualstudio.com/docs/languages/json#_json-schemas-and-settings), [IntelliJ](https://www.jetbrains.com/help/idea/json.html#ws_json_using_schemas), [neovim](https://github.com/b0o/SchemaStore.nvim), etc.). It is also available in the [JSON schema store](https://www.schemastore.org/).
-- Note that for `included tasks` (see [task configuration](/tasks/task-configuration), there is another schema: <https://mise.jdx.dev/schema/mise-task.json>)
+- Note that for `included tasks` (see [task configuration](/tasks/task-configuration), there is another schema: <https://mise.en.dev/schema/mise-task.json>)
 
 ## Global config: `~/.config/mise/config.toml`
 
@@ -317,8 +321,8 @@ python = ['3.10', '3.11']
 # for example, .nvmrc in the case of node's nvm
 idiomatic_version_file_enable_tools = ['node']
 
-# configure `mise install` to always keep the downloaded archive
-always_keep_download = false        # deleted after install by default
+# keep downloaded archive/source files for debugging
+always_keep_download = false        # deleted after install; not a cache
 always_keep_install = false         # deleted on failure by default
 
 # configure how frequently (in minutes) to fetch updated plugin repository changes
@@ -338,14 +342,12 @@ raw = false           # set to true to directly pipe plugins to stdin/stdout/std
 yes = false           # set to true to automatically answer yes to all prompts
 
 not_found_auto_install = true # see MISE_NOT_FOUND_AUTO_INSTALL
-task_output = "prefix" # see Tasks Runner for more information
+task.output = "prefix" # see Tasks Runner for more information
 paranoid = false       # see MISE_PARANOID
 
-shorthands_file = '~/.config/mise/shorthands.toml' # path to the shorthands file, see `MISE_SHORTHANDS_FILE`
-disable_default_shorthands = false # disable the default shorthands, see `MISE_DISABLE_DEFAULT_SHORTHANDS`
+# shorthands_file is deprecated - use [plugins] in this file (see "plugins" above)
+disable_default_registry = false   # disable the default registry, see `MISE_DISABLE_DEFAULT_REGISTRY`
 disable_tools = ['node']           # disable specific tools, generally used to turn off core tools
-
-env_file = '.env' # load env vars from a dotenv file, see `MISE_ENV_FILE`
 
 experimental = true # enable experimental features
 
@@ -355,6 +357,9 @@ status = {
   show_env = false,
   show_tools = false,
 }
+
+[env]
+_.file = '.env'
 
 # "_" is a special key for information you'd like to put into mise.toml that mise will never parse
 [_]
@@ -414,22 +419,29 @@ other developers to use a specific tool like mise or asdf.
 They support aliases, which means you can have an `.nvmrc` file with `lts/hydrogen` and it will work
 in mise and nvm. Here are some of the supported idiomatic version files:
 
-| Plugin     | Idiomatic Files                       |
-| ---------- | ------------------------------------- |
-| atmos      | `.atmos-version`                      |
-| crystal    | `.crystal-version`                    |
-| elixir     | `.exenv-version`                      |
-| go         | `.go-version`                         |
-| java       | `.java-version`, `.sdkmanrc`          |
-| node       | `.nvmrc`, `.node-version`             |
-| opentofu   | `.opentofu-version`                   |
-| packer     | `.packer-version`                     |
-| python     | `.python-version`, `.python-versions` |
-| ruby       | `.ruby-version`, `Gemfile`            |
-| terraform  | `.terraform-version`, `main.tf`       |
-| terragrunt | `.terragrunt-version`                 |
-| terramate  | `.terramate-version`                  |
-| yarn       | `.yvmrc`                              |
+| Plugin     | Idiomatic Files                           |
+| ---------- | ----------------------------------------- |
+| atmos      | `.atmos-version`                          |
+| bun        | `.bun-version`, `package.json`            |
+| crystal    | `.crystal-version`                        |
+| deno       | `.deno-version`, `package.json`           |
+| dotnet     | `global.json`                             |
+| elixir     | `.exenv-version`                          |
+| go         | `.go-version`                             |
+| java       | `.java-version`, `.sdkmanrc`              |
+| node       | `.nvmrc`, `.node-version`, `package.json` |
+| npm        | `package.json`                            |
+| opentofu   | `.opentofu-version`                       |
+| packer     | `.packer-version`                         |
+| perl       | `.perl-version`                           |
+| pnpm       | `package.json`                            |
+| python     | `.python-version`, `.python-versions`     |
+| ruby       | `.ruby-version`, `Gemfile`                |
+| rust       | `rust-toolchain.toml`                     |
+| terraform  | `.terraform-version`, `main.tf`           |
+| terragrunt | `.terragrunt-version`                     |
+| terramate  | `.terramate-version`                      |
+| yarn       | `.yvmrc`, `package.json`                  |
 
 In mise, these are disabled by default, see <https://github.com/jdx/mise/discussions/4345> for rationale.
 
@@ -468,7 +480,9 @@ mise can also be configured via environment variables. The following options are
 
 ### `MISE_DATA_DIR`
 
-Default: `~/.local/share/mise` or `$XDG_DATA_HOME/mise`
+Default (Linux): `~/.local/share/mise` or `$XDG_DATA_HOME/mise`
+Default (macOS): `~/.local/share/mise` or `$XDG_DATA_HOME/mise`
+Default (Windows): `%LOCALAPPDATA%\mise` or `$XDG_DATA_HOME/mise`
 
 This is the directory where mise stores plugins and tool installs. These are not supposed to be
 shared
@@ -478,6 +492,7 @@ across machines.
 
 Default (Linux): `~/.cache/mise` or `$XDG_CACHE_HOME/mise`
 Default (macOS): `~/Library/Caches/mise` or `$XDG_CACHE_HOME/mise`
+Default (Windows): `%TEMP%\mise` or `$XDG_CACHE_HOME/mise`
 
 This is the directory where mise stores internal cache. This is not supposed to be shared
 across machines. It may be deleted at any time mise is not running.
@@ -489,15 +504,16 @@ in rust
 
 This is used for temporary storage such as when installing tools.
 
-### `MISE_SYSTEM_DIR`
+### `MISE_SYSTEM_CONFIG_DIR`
 
 Default: `/etc/mise`
 
 This is the directory where mise stores system-wide configuration.
+`MISE_SYSTEM_DIR` is also supported as a legacy alias.
 
 ### `MISE_GLOBAL_CONFIG_FILE`
 
-Default: `$MISE_CONFIG_DIR/config.toml` (Usually ~/.config/mise/config.toml)
+Default: `$MISE_CONFIG_DIR/config.toml` (Usually `~/.config/mise/config.toml`)
 
 This is the path to the config file.
 
@@ -511,6 +527,8 @@ This is the path which is used as `{{config_root}}` for the global config file.
 
 ### `MISE_ENV_FILE`
 
+Deprecated. Use `env._.file` in `mise.toml` or `~/.config/mise/config.toml` instead.
+
 Set to a filename to read from env from a dotenv file. e.g.: `MISE_ENV_FILE=.env`.
 Uses [dotenvy](https://crates.io/crates/dotenvy) under the hood.
 
@@ -522,7 +540,8 @@ of what is set in `mise.toml`/`.tool-versions`.
 ### `MISE_TRUSTED_CONFIG_PATHS`
 
 This is a list of paths that mise will automatically mark as
-trusted. They can be separated with `:`.
+trusted. They are separated according to platform conventions for the PATH
+environment variable: `:` on Unix and `;` on Windows.
 
 ### `MISE_CEILING_PATHS`
 
@@ -549,6 +568,14 @@ to store the logs but not have them litter your display.
 ### `MISE_LOG_HTTP=1`
 
 Display HTTP requests/responses in the logs.
+
+### `MISE_LOG_VERBOSE_DEPS=1`
+
+Debug and trace logs from noisy third-party crates (`h2`, `hyper`,
+`reqwest`, `rustls`, etc., which emit a line per HTTP/2 frame or socket
+read) are always dropped — they would otherwise overwhelm debug/trace
+output. Set this to `1` to let those logs through; it is the only way to
+see them, including under `--log-level=trace`/`-vv`.
 
 ### `MISE_QUIET=1`
 

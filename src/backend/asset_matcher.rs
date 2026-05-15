@@ -21,6 +21,7 @@ use std::sync::LazyLock;
 
 use super::platform_target::PlatformTarget;
 use super::static_helpers::get_filename_from_url;
+use crate::file::TarFormat;
 use crate::http::HTTP;
 
 // ========== Platform Detection Types (from asset_detector) ==========
@@ -70,11 +71,11 @@ impl AssetArch {
 
 impl AssetLibc {
     pub fn matches_target(&self, target: &str) -> bool {
-        match self {
-            AssetLibc::Gnu => target == "gnu",
-            AssetLibc::Musl => target == "musl",
-            AssetLibc::Msvc => target == "msvc",
-        }
+        target.split('-').any(|part| match self {
+            AssetLibc::Gnu => part == "gnu" || part == "glibc",
+            AssetLibc::Musl => part == "musl",
+            AssetLibc::Msvc => part == "msvc",
+        })
     }
 }
 
@@ -164,11 +165,6 @@ static LIBC_PATTERNS: LazyLock<Vec<(AssetLibc, Regex)>> = LazyLock::new(|| {
     ]
 });
 
-static ARCHIVE_EXTENSIONS: &[&str] = &[
-    ".tar.gz", ".tar.bz2", ".tar.xz", ".tar.zst", ".tgz", ".tbz2", ".txz", ".tzst", ".zip", ".7z",
-    ".tar",
-];
-
 // ========== AssetPicker (from asset_detector) ==========
 
 /// Automatically detects the best asset for the current platform
@@ -180,13 +176,15 @@ pub struct AssetPicker {
 }
 
 impl AssetPicker {
-    /// Create an AssetPicker with an explicit libc setting
+    /// Create an AssetPicker with an explicit libc setting.
+    /// When no explicit libc is provided, defaults to the platform's standard libc
+    /// (msvc for Windows, gnu for Linux/other). The caller is responsible for passing
+    /// the correct libc qualifier from PlatformTarget — this avoids polluting
+    /// cross-platform lockfile entries with the current system's libc.
     pub fn with_libc(target_os: String, target_arch: String, libc: Option<String>) -> Self {
         let target_libc = libc.unwrap_or_else(|| {
             if target_os == "windows" {
                 "msvc".to_string()
-            } else if cfg!(target_env = "musl") {
-                "musl".to_string()
             } else {
                 "gnu".to_string()
             }
@@ -206,14 +204,25 @@ impl AssetPicker {
         self
     }
 
-    /// Picks the best asset from available options
+    /// Picks the best asset from available options.
+    ///
+    /// When multiple assets tie on score, prefers the shortest name. This handles
+    /// the common case where a repo ships several binaries per platform (e.g.
+    /// `tool-x64.tar.gz`, `tool-lsp-x64.tar.gz`, `tool-mcp-x64.tar.gz`) — the
+    /// canonical binary's name is almost always the shortest.
+    /// See: https://github.com/jdx/mise/discussions/9358
     pub fn pick_best_asset(&self, assets: &[String]) -> Option<String> {
-        let mut scored_assets = self.score_all_assets(assets);
-        scored_assets.sort_by(|a, b| b.0.cmp(&a.0));
+        let scored_assets = self.score_all_assets(assets);
         scored_assets
-            .first()
+            .into_iter()
             .filter(|(score, _)| *score > 0)
-            .map(|(_, asset)| asset.clone())
+            .min_by(|(score_a, name_a), (score_b, name_b)| {
+                score_b
+                    .cmp(score_a)
+                    .then_with(|| name_a.len().cmp(&name_b.len()))
+                    .then_with(|| name_a.cmp(name_b))
+            })
+            .map(|(_, asset)| asset)
     }
 
     /// Picks the best provenance file for the current platform from available assets.
@@ -243,7 +252,7 @@ impl AssetPicker {
             })
             .collect();
 
-        scored.sort_by(|a, b| b.0.cmp(&a.0));
+        scored.sort_by_key(|item| std::cmp::Reverse(item.0));
         scored.first().map(|(_, asset)| (*asset).clone())
     }
 
@@ -319,19 +328,17 @@ impl AssetPicker {
     }
 
     fn score_format_preferences(&self, asset: &str) -> i32 {
-        let asset = asset.to_lowercase();
-        if asset.ends_with(".zip") {
+        let format = TarFormat::from_file_name(asset);
+
+        if format == TarFormat::Zip {
             if self.target_os == "windows" {
                 return 15;
             } else {
                 return 5;
             }
         }
-        if ARCHIVE_EXTENSIONS.iter().any(|ext| asset.ends_with(ext)) {
-            10
-        } else {
-            0
-        }
+
+        if format.is_archive() { 10 } else { 0 }
     }
 
     fn score_build_penalties(&self, asset: &str) -> i32 {
@@ -351,6 +358,11 @@ impl AssetPicker {
         // .app bundles often contain Xcode extensions or GUI apps, not CLI tools
         if self.no_app && asset.contains(".app.") {
             penalty -= 50;
+        }
+
+        // Penalize .vsix files
+        if asset.ends_with(".vsix") {
+            penalty -= 100;
         }
 
         // Penalize metadata/checksum/signature files
@@ -1084,6 +1096,48 @@ abc123def456abc123def456abc123def456abc123def456abc123def456abcd  tool-1.0.0-dar
     }
 
     #[test]
+    fn test_shortest_name_tiebreak_picks_canonical_binary() {
+        // Repos like agent-sh/agnix ship multiple binaries per platform
+        // (agnix, agnix-lsp, agnix-mcp). All score identically — the tiebreak
+        // should prefer the shortest name, which is the canonical tool.
+        // See: https://github.com/jdx/mise/discussions/9358
+        let assets = vec![
+            "agnix-lsp-x86_64-unknown-linux-gnu.tar.gz".to_string(),
+            "agnix-mcp-x86_64-unknown-linux-gnu.tar.gz".to_string(),
+            "agnix-x86_64-unknown-linux-gnu.tar.gz".to_string(),
+        ];
+
+        let picker = AssetPicker::with_libc("linux".to_string(), "x86_64".to_string(), None);
+        let picked = picker.pick_best_asset(&assets).unwrap();
+        assert_eq!(picked, "agnix-x86_64-unknown-linux-gnu.tar.gz");
+
+        // Should be order-independent: shuffle and confirm the same winner.
+        let assets_reordered = vec![
+            "agnix-x86_64-unknown-linux-gnu.tar.gz".to_string(),
+            "agnix-lsp-x86_64-unknown-linux-gnu.tar.gz".to_string(),
+            "agnix-mcp-x86_64-unknown-linux-gnu.tar.gz".to_string(),
+        ];
+        let picked = picker.pick_best_asset(&assets_reordered).unwrap();
+        assert_eq!(picked, "agnix-x86_64-unknown-linux-gnu.tar.gz");
+    }
+
+    #[test]
+    fn test_shortest_name_tiebreak_picks_plain_bun() {
+        // bun ships baseline/profile variants alongside the canonical build.
+        // All tar.gz, all matching platform — shortest should win.
+        let assets = vec![
+            "bun-linux-x64-baseline-profile.zip".to_string(),
+            "bun-linux-x64-baseline.zip".to_string(),
+            "bun-linux-x64-profile.zip".to_string(),
+            "bun-linux-x64.zip".to_string(),
+        ];
+
+        let picker = AssetPicker::with_libc("linux".to_string(), "x86_64".to_string(), None);
+        let picked = picker.pick_best_asset(&assets).unwrap();
+        assert_eq!(picked, "bun-linux-x64.zip");
+    }
+
+    #[test]
     fn test_for_target_with_libc_qualifier() {
         use crate::backend::platform_target::PlatformTarget;
         use crate::platform::Platform;
@@ -1110,6 +1164,15 @@ abc123def456abc123def456abc123def456abc123def456abc123def456abcd  tool-1.0.0-dar
             .pick_from(&assets)
             .unwrap();
         assert_eq!(result.name, "tool-1.0.0-linux-x86_64-gnu.tar.gz");
+
+        // Compound qualifier still carries the libc preference.
+        let platform = Platform::parse("linux-x64-musl-baseline").unwrap();
+        let target = PlatformTarget::new(platform);
+        let result = AssetMatcher::new()
+            .for_target(&target)
+            .pick_from(&assets)
+            .unwrap();
+        assert_eq!(result.name, "tool-1.0.0-linux-x86_64-musl.tar.gz");
     }
 
     #[test]
@@ -1367,5 +1430,17 @@ abc123def456abc123def456abc123def456abc123def456abc123def456abcd  tool-darwin.ta
             picked, "tool-1.0.0.provenance.json",
             "Should return the only provenance file available"
         );
+    }
+
+    #[test]
+    fn test_vsix_vs_gz() {
+        let picker = AssetPicker::with_libc("macos".to_string(), "x86_64".to_string(), None);
+        let assets = vec![
+            "rust-analyzer-x86_64-apple-darwin.gz".to_string(),
+            "rust-analyzer-x86_64-apple-darwin.vsix".to_string(),
+        ];
+
+        let picked = picker.pick_best_asset(&assets).unwrap();
+        assert_eq!(picked, "rust-analyzer-x86_64-apple-darwin.gz");
     }
 }

@@ -37,15 +37,6 @@ pub struct FileCacheStore {
     cache_dir: PathBuf,
 }
 
-/// Baked registry files (compiled into binary)
-pub static AQUA_STANDARD_REGISTRY_FILES: LazyLock<HashMap<&'static str, &'static str>> =
-    LazyLock::new(|| include!(concat!(env!("OUT_DIR"), "/aqua_standard_registry.rs")));
-
-/// Returns all package IDs from the baked-in aqua registry.
-pub fn package_ids() -> Vec<&'static str> {
-    AQUA_STANDARD_REGISTRY_FILES.keys().copied().collect()
-}
-
 impl AquaRegistry {
     /// Create a new AquaRegistry with the given configuration
     pub fn new(config: AquaRegistryConfig) -> Self {
@@ -99,32 +90,16 @@ where
             return Ok(pkg.clone());
         }
 
-        let registry = self.fetcher.fetch_registry(id).await?;
-        let mut pkg = registry
-            .packages
-            .into_iter()
-            .next()
-            .ok_or_else(|| AquaRegistryError::PackageNotFound(id.to_string()))?;
+        let mut pkg = self.fetcher.fetch_package(id).await?;
 
         pkg.setup_version_filter()?;
         CACHE.lock().await.insert(id.to_string(), pkg.clone());
         Ok(pkg)
     }
-
-    /// Get a package definition configured for specific versions
-    pub async fn package_with_version(
-        &self,
-        id: &str,
-        versions: &[&str],
-        os: &str,
-        arch: &str,
-    ) -> Result<AquaPackage> {
-        Ok(self.package(id).await?.with_version(versions, os, arch))
-    }
 }
 
 impl RegistryFetcher for DefaultRegistryFetcher {
-    async fn fetch_registry(&self, package_id: &str) -> Result<RegistryYaml> {
+    async fn fetch_package(&self, package_id: &str) -> Result<AquaPackage> {
         let path_id = package_id
             .split('/')
             .collect::<Vec<_>>()
@@ -140,16 +115,13 @@ impl RegistryFetcher for DefaultRegistryFetcher {
         if self.config.cache_dir.join(".git").exists() && path.exists() {
             log::trace!("reading aqua-registry for {package_id} from repo at {path:?}");
             let contents = std::fs::read_to_string(&path)?;
-            return Ok(serde_yaml::from_str(&contents)?);
-        }
-
-        // Fall back to baked registry if enabled
-        #[allow(clippy::collapsible_if)]
-        if self.config.use_baked_registry && AQUA_STANDARD_REGISTRY_FILES.contains_key(package_id) {
-            if let Some(content) = AQUA_STANDARD_REGISTRY_FILES.get(package_id) {
-                log::trace!("reading baked-in aqua-registry for {package_id}");
-                return Ok(serde_yaml::from_str(content)?);
-            }
+            let registry = serde_yaml::from_str::<RegistryYaml>(&contents)?;
+            return registry
+                .packages
+                .into_iter()
+                .next()
+                .map(|row| row.package)
+                .ok_or_else(|| AquaRegistryError::PackageNotFound(package_id.to_string()));
         }
 
         Err(AquaRegistryError::RegistryNotAvailable(format!(

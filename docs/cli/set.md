@@ -9,7 +9,7 @@ Set environment variables in mise.toml
 By default, this command modifies `mise.toml` in the current directory.
 If multiple config files exist (e.g., both `mise.toml` and `mise.local.toml`),
 the lowest precedence file (`mise.toml`) will be used.
-See <https://mise.jdx.dev/configuration.html#target-file-for-write-operations>
+See <https://mise.en.dev/configuration.html#target-file-for-write-operations>
 
 Use `-E <env>` to create/modify environment-specific config files like `mise.<env>.toml`.
 
@@ -58,6 +58,10 @@ The TOML file to update
 
 Can be a file path or directory. If a directory is provided, will create/use mise.toml in that directory.
 Defaults to MISE_DEFAULT_CONFIG_FILENAME environment variable, or `mise.toml`.
+
+### `--no-redact`
+
+Show raw values instead of redacting secrets
 
 ### `--prompt`
 

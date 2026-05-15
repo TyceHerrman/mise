@@ -2,7 +2,7 @@
 
 # Getting Started
 
-This will show you how to install mise and get started with it. This is a suitable way when using an interactive shell like `bash`, `zsh`, or `fish`.
+Get up and running with mise in minutes.
 
 ## 1. Install `mise` CLI {#installing-mise-cli}
 
@@ -15,8 +15,9 @@ See [installing mise](/installing-mise) for other ways to install mise (`macport
 curl https://mise.run | sh
 ```
 
-By default, mise will be installed to `~/.local/bin` (this is simply a suggestion. `mise` can be installed anywhere).
-You can verify the installation by running:
+By default, mise installs to `~/.local/bin`, but it can go anywhere.
+
+Verify the installation:
 
 ```shell
 ~/.local/bin/mise --version
@@ -53,8 +54,8 @@ choco install mise
 ```sh
 sudo apt update -y && sudo apt install -y curl
 sudo install -dm 755 /etc/apt/keyrings
-curl -fSs https://mise.jdx.dev/gpg-key.pub | sudo tee /etc/apt/keyrings/mise-archive-keyring.asc 1> /dev/null
-echo "deb [signed-by=/etc/apt/keyrings/mise-archive-keyring.asc] https://mise.jdx.dev/deb stable main" | sudo tee /etc/apt/sources.list.d/mise.list
+curl -fSs https://mise.en.dev/gpg-key.pub | sudo tee /etc/apt/keyrings/mise-archive-keyring.asc 1> /dev/null
+echo "deb [signed-by=/etc/apt/keyrings/mise-archive-keyring.asc] https://mise.en.dev/deb stable main" | sudo tee /etc/apt/sources.list.d/mise.list
 sudo apt update -y
 sudo apt install -y mise
 ```
@@ -83,35 +84,37 @@ to change these locations.
 
 ## 2. mise `exec` and `run` {#mise-exec-run}
 
-Once `mise` is installed, you can immediately start using it. `mise` can be used to install and run [tools](/dev-tools/), launch [tasks](/tasks/), and manage [environment variables](/environments/).
+Once installed, you can start using mise right away to install and run [tools](/dev-tools/), launch [tasks](/tasks/), and manage [environment variables](/environments/).
 
-The most essential feature `mise` provides is the ability to run [tools](/dev-tools/) with specific versions. A simple way to run a shell command with a given tool is to use [`mise x|exec`](/cli/exec.html). For example, here is how you can start a Python 3 interactive shell (REPL):
+The quickest way to run a tool at a specific version is [`mise x|exec`](/cli/exec.html). For example, to launch a Python 3 REPL:
 
-> _In the examples below, use `~/.local/bin/mise` (or the absolute path to `mise`) if `mise` is not already on `PATH`_
+::: tip
+If `mise` isn't on `PATH` yet, use `~/.local/bin/mise` instead.
+:::
 
 ```sh
 mise exec python@3 -- python
 # this will download and install Python if it is not already installed
-# Python 3.13.2
+# Python 3.15.0
 # >>> ...
 ```
 
-or run node 24:
+or run node 26:
 
 ```sh
-mise exec node@24 -- node -v
-# v24.x.x
+mise exec node@26 -- node -v
+# v26.x.x
 ```
 
-[`mise x|exec`](/cli/exec.html) is a powerful way to load the current `mise` context (tools & environment variables) without modifying your shell session or running ad-hoc commands with mise tools set. Installing [`tools`](/dev-tools/) is as simple as running [`mise u|use`](/cli/use.html).
+To install a tool permanently, use [`mise u|use`](/cli/use.html):
 
 ```shell
-mise use --global node@24 # install node 24 and set it as the global default
+mise use --global node@26 # install node 26 and set it as the global default
 mise exec -- node my-script.js
-# run my-script.js with node 24...
+# run my-script.js with node 26...
 ```
 
-Another useful command is [`mise r|run`](/cli/run.html) which allows you to run a [`mise task`](/tasks/) or a script with the `mise` context.
+[`mise r|run`](/cli/run.html) lets you run [tasks](/tasks/) or scripts with the full mise context (tools + env vars) loaded.
 
 ::: tip
 You can set a shell alias in your shell's rc file like `alias x="mise x --"` to save some keystrokes.
@@ -119,15 +122,17 @@ You can set a shell alias in your shell's rc file like `alias x="mise x --"` to 
 
 ## 3. Activate `mise` <Badge text="optional" /> {#activate-mise}
 
-While using [`mise x|exec`](/cli/exec.html) is useful, for interactive shells, you might prefer to activate `mise` to automatically load the `mise` context (`tools` and `environment variables`) in your shell session. Another option is to use [shims](dev-tools/shims.md).
+`mise exec` works great for one-off commands, but for interactive shells you'll probably want to activate mise so tools and environment variables are loaded automatically.
 
-- [`mise activate`](/cli/activate) method updates your environment variable and `PATH` every time your prompt is run to ensure you use the correct versions.
-- [Shims](dev-tools/shims.md) are symlinks to the `mise` binary that intercept commands and load the appropriate environment. Note that [**shims do not support all the features of `mise activate`**](/dev-tools/shims.html#shims-vs-path).
+There are two approaches:
 
-For interactive shells, `mise activate` is recommended. In non-interactive sessions, like CI/CD, IDEs, and scripts, using `shims` might work best. You can also not use any and call `mise exec/run` directly instead.
+- [`mise activate`](/cli/activate) — updates your `PATH` and environment every time your prompt runs. Recommended for interactive shells.
+- [Shims](dev-tools/shims.md) — symlinks that intercept commands and load the right environment. Better for CI/CD, IDEs, and scripts. Note that [shims don't support all features of `mise activate`](/dev-tools/shims.html#shims-vs-path).
+
+You can also skip both and call `mise exec` or `mise run` directly.
 See [this guide](dev-tools/shims.md) for more information.
 
-Here is how you can activate `mise` depending on your shell and the installation method:
+Here is how to activate mise for your shell:
 
 :::tabs key:installing-mise
 
@@ -201,23 +206,33 @@ echo 'mise activate fish | source' >> ~/.config/fish/config.fish
 
 :::
 
-Make sure you restart your shell session after modifying your rc file in order for it to take effect.
-You can run [`mise dr|doctor`](/cli/doctor.html) to verify that mise is correctly installed and activated.
+Restart your shell session after modifying your rc file. Run [`mise dr|doctor`](/cli/doctor.html) to verify everything is set up correctly.
 
-Now that `mise` is activated or its shims have been added to `PATH`, `node` is also available directly! (without using `mise exec`):
+With mise activated, tools are available directly on `PATH`:
 
 ```sh
-mise use --global node@24
+mise use --global node@26
 node -v
-# v24.x.x
+# v26.x.x
 ```
 
-Note that when you ran `mise use --global node@24`, `mise` updated the global `mise` configuration.
+When you ran `mise use --global node@26`, mise updated your global config:
 
 ```toml [~/.config/mise/config.toml]
 [tools]
-node = "24"
+node = "26"
 ```
+
+### Shell Feature Compatibility {#shell-feature-compatibility}
+
+Not all shells support every mise feature:
+
+| Feature                         | Bash | Zsh | Fish | Nushell | Elvish | Xonsh | PowerShell |
+| ------------------------------- | ---- | --- | ---- | ------- | ------ | ----- | ---------- |
+| `mise activate`                 | Yes  | Yes | Yes  | Yes     | Yes    | Yes   | Yes        |
+| `mise shell`                    | Yes  | Yes | Yes  | Yes     | Yes    | Yes   | Yes        |
+| Shell aliases (`[shell_alias]`) | Yes  | Yes | Yes  | No      | No     | Yes   | No         |
+| `chpwd` hook                    | Yes  | Yes | Yes  | Yes     | Yes    | Yes   | Yes        |
 
 ## 4. Use tools from backends (npm, pipx, core, aqua, github) {#tool-backends}
 
@@ -256,46 +271,85 @@ flowchart LR
   end
 ```
 
-Backends are ecosystems or package managers that mise uses to install tools. With `mise use`, you can install multiple tools from each backend.
+Backends are the package ecosystems that mise pulls tools from. With `mise use`, you can install from any of them.
 
-For example, to install [claude-code](https://www.npmjs.com/package/@anthropic-ai/claude-code) with the npm backend:
+Install [claude-code](https://www.npmjs.com/package/@anthropic-ai/claude-code) from npm:
 
 ```sh
-# run claude-code via mise x|exec
+# one-off
 mise exec npm:@anthropic-ai/claude-code -- claude --version
 
-# or if mise is activated in your shell
+# or install globally
 mise use --global npm:@anthropic-ai/claude-code
 claude --version
 ```
 
-Install [black](https://github.com/psf/black) with the pipx backend:
+Install [black](https://github.com/psf/black) from PyPI via pipx:
 
 ```sh
-# run black via mise x|exec
+# one-off
 mise exec pipx:black -- black --version
 
-# or if mise is activated in your shell
+# or install globally
 mise use --global pipx:black
 black --version
 ```
 
-mise can also install tools directly from github with the github backend:
+Install [ripgrep](https://github.com/BurntSushi/ripgrep) directly from GitHub releases:
 
 ```sh
-# run ripgrep via mise x|exec
+# one-off
 mise exec github:BurntSushi/ripgrep -- rg --version
 
-# or if mise is activated in your shell
+# or install globally
 mise use --global github:BurntSushi/ripgrep
-ripgrep --version
+rg --version
 ```
+
+Each `mise use` command above updates your config file. For example, after running all three globally, your `~/.config/mise/config.toml` would contain:
+
+```toml [~/.config/mise/config.toml]
+[tools]
+"npm:@anthropic-ai/claude-code" = "latest"
+"pipx:black" = "latest"
+"github:BurntSushi/ripgrep" = "latest"
+```
+
+You can also edit `mise.toml` directly instead of using `mise use` — the effect is the same. Run `mise install` after editing to install the tools.
 
 See [Backends](/dev-tools/backends/) for more ecosystems and details.
 
+## Trusting config files {#trust}
+
+When you or a teammate adds a `mise.toml` to a project, mise will prompt you to trust it before it runs any env directives or hooks:
+
+```
+mise ~/my-project/mise.toml is not trusted. Trust it? [y/n]
+```
+
+This is a security measure — config files can execute arbitrary code via `[env]` directives, hooks, and tasks. To trust a file, run:
+
+```sh
+mise trust
+```
+
+This only needs to be done once per file. See [`mise trust`](/cli/trust) for more details.
+
+To disable trust prompts entirely, trust the root path:
+
+```sh
+mise settings trusted_config_paths=["/"]
+```
+
+Or set the environment variable `MISE_TRUSTED_CONFIG_PATHS=/`.
+
+::: tip
+`mise use` automatically trusts the file it creates, so you'll only see this prompt when pulling a config someone else wrote or when editing `mise.toml` by hand.
+:::
+
 ## 5. Setting environment variables {#environment-variables}
 
-You can set environment variables in `mise.toml` which will be set if mise is activated or if `mise x|exec` is used in a directory:
+Define environment variables in `mise.toml` — they'll be loaded whenever mise is activated or when using `mise exec`:
 
 ```toml [mise.toml]
 [env]
@@ -312,14 +366,12 @@ echo "node env: $NODE_ENV"
 
 ## 6. Run a task {#run-a-task}
 
-You can define simple tasks in `mise.toml` and run them with `mise run`:
+Define tasks in `mise.toml` and run them with `mise run`:
 
 ```toml [mise.toml]
 [tasks]
 hello = "echo hello from mise"
 ```
-
-Run it:
 
 ```sh
 mise run hello
@@ -327,10 +379,10 @@ mise run hello
 ```
 
 :::tip
-mise tasks will automatically install all of the tools from `mise.toml` before running the task.
+mise automatically installs all tools from `mise.toml` before running a task.
 :::
 
-See [tasks](/tasks/) for more information on how to define and use tasks.
+See [tasks](/tasks/) for more on defining and running tasks.
 
 ## 7. Next steps {#next-steps}
 
@@ -343,8 +395,5 @@ See [autocompletion](/installing-mise.html#autocompletion) to learn how to set u
 ### GitHub API rate limiting {#github-api-rate-limiting}
 
 ::: warning
-Many tools in mise require the use of the GitHub API. Unauthenticated requests to the GitHub API are
-often rate limited. If you see 4xx errors while using mise, you can set `MISE_GITHUB_TOKEN` or `GITHUB_TOKEN`
-to a token [generated from here](https://github.com/settings/tokens/new?description=MISE_GITHUB_TOKEN) which
-will likely fix the issue. The token does not require any scopes.
+Many tools in mise require the GitHub API. Unauthenticated requests are often rate limited — if you see 4xx errors, see [GitHub Tokens](/dev-tools/github-tokens.html) for how to configure authentication.
 :::

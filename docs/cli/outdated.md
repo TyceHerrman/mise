@@ -31,6 +31,19 @@ show other 20.x versions, not 21.x or 22.x versions.
 
 Using this flag, if there are 21.x or newer versions it will display those instead of 20.x.
 
+### `--inactive`
+
+Show outdated tools including installed-but-inactive tools not present in the current config
+
+By default, `mise outdated` only shows tools that come from the current config.
+
+### `--local`
+
+Only show outdated tools defined in local config files
+
+This will only show tools that are defined in project-local mise.toml and
+will skip tools defined in the global config (~/.config/mise/config.toml).
+
 ### `--no-header`
 
 Don't show table header
@@ -49,4 +62,8 @@ node    20         20.0.0   20.1.0
 
 $ mise outdated --json
 {"python": {"requested": "3.11", "current": "3.11.0", "latest": "3.11.1"}, ...}
+
+$ mise outdated --local
+Plugin  Requested  Current  Latest
+node    20         20.0.0   20.1.0
 ```

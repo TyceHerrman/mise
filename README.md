@@ -1,39 +1,49 @@
 <div align="center">
 
 <h1 align="center">
-  <a href="https://mise.jdx.dev">
-    <img src="docs/public/logo.svg" alt="mise" width="256" height="256" />
+  <a href="https://mise.en.dev">
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="docs/public/logo-dark.svg" />
+      <img src="docs/public/logo-light.svg" alt="mise" width="256" height="256" />
+    </picture>
     <br>
     mise-en-place
   </a>
 </h1>
 
 <p>
-  <a href="https://crates.io/crates/mise"><img alt="Crates.io" src="https://img.shields.io/crates/v/mise?style=for-the-badge&color=00d9ff"></a>
-  <a href="https://github.com/jdx/mise/blob/main/LICENSE"><img alt="GitHub" src="https://img.shields.io/github/license/jdx/mise?style=for-the-badge&color=52e892"></a>
-  <a href="https://github.com/jdx/mise/actions/workflows/test.yml"><img alt="GitHub Workflow Status" src="https://img.shields.io/github/actions/workflow/status/jdx/mise/test.yml?style=for-the-badge&color=ff9100"></a>
-  <a href="https://discord.gg/mABnUDvP57"><img alt="Discord" src="https://img.shields.io/discord/1066429325269794907?style=for-the-badge&color=00d9ff"></a>
+  <a href="https://crates.io/crates/mise"><img alt="Crates.io" src="https://img.shields.io/crates/v/mise?style=for-the-badge&color=8B2252"></a>
+  <a href="https://github.com/jdx/mise/blob/main/LICENSE"><img alt="GitHub" src="https://img.shields.io/github/license/jdx/mise?style=for-the-badge&color=6B7F4E"></a>
+  <a href="https://github.com/jdx/mise/actions/workflows/test.yml"><img alt="GitHub Workflow Status" src="https://img.shields.io/github/actions/workflow/status/jdx/mise/test.yml?style=for-the-badge&color=C5975B"></a>
+  <a href="https://discord.gg/mABnUDvP57"><img alt="Discord" src="https://img.shields.io/discord/1066429325269794907?style=for-the-badge&color=8B2252"></a>
 </p>
 
-<p><b>The front-end to your dev env</b></p>
+<p><b>Dev tools, env vars, and tasks in one CLI</b></p>
 
 <p align="center">
-  <a href="https://mise.jdx.dev/getting-started.html">Getting Started</a> •
-  <a href="https://mise.jdx.dev">Documentation</a> •
-  <a href="https://mise.jdx.dev/dev-tools/">Dev Tools</a> •
-  <a href="https://mise.jdx.dev/environments/">Environments</a> •
-  <a href="https://mise.jdx.dev/tasks/">Tasks</a>
+  <a href="https://mise.en.dev/getting-started.html">Getting Started</a> •
+  <a href="https://mise.en.dev">Documentation</a> •
+  <a href="https://mise.en.dev/dev-tools/">Dev Tools</a> •
+  <a href="https://mise.en.dev/environments/">Environments</a> •
+  <a href="https://mise.en.dev/tasks/">Tasks</a>
 </p>
 
 <hr />
 
 </div>
 
+> [!TIP]
+> My latest project, [aube](https://aube.en.dev) just hit stable! It's the fastest Node.js package manager with strong security defaults and is compatible with npm/pnpm/yarn lockfiles!
+
 ## What is it?
 
-- Like [asdf](https://asdf-vm.com) (or [nvm](https://github.com/nvm-sh/nvm) or [pyenv](https://github.com/pyenv/pyenv) but for any language) it manages [dev tools](https://mise.jdx.dev/dev-tools/) like node, python, cmake, terraform, and [hundreds more](https://mise.jdx.dev/registry.html).
-- Like [direnv](https://github.com/direnv/direnv) it manages [environment variables](https://mise.jdx.dev/environments/) for different project directories.
-- Like [make](https://www.gnu.org/software/make/manual/make.html) it manages [tasks](https://mise.jdx.dev/tasks/) used to build and test projects.
+`mise` prepares your development environment before each command runs. It keeps
+project tools, environment variables, and tasks in one `mise.toml` file so new
+shells, checkouts, and CI jobs all start from the same setup.
+
+- Install and switch between [dev tools](https://mise.en.dev/dev-tools/) like node, python, cmake, terraform, and [hundreds more](https://mise.en.dev/registry.html).
+- Load [environment variables](https://mise.en.dev/environments/) per project directory, including values from `.env` files and other sources.
+- Define and run [tasks](https://mise.en.dev/tasks/) for building, testing, linting, and deploying projects.
 
 ## Demo
 
@@ -42,15 +52,15 @@ Note that calling `which node` gives us a real path to node, not a shim.
 
 It also shows that you can use `mise` to install and many other tools such as `jq`, `terraform`, or `go`.
 
-[![demo](./docs/tapes/demo.gif)](https://mise.jdx.dev/demo.html)
+[![demo](./docs/tapes/demo.gif)](https://mise.en.dev/demo.html)
 
-See [demo transcript](https://mise.jdx.dev/demo.html).
+See [demo transcript](https://mise.en.dev/demo.html).
 
 ## Quickstart
 
 ### Install mise
 
-See [Getting started](https://mise.jdx.dev/getting-started.html) for more options.
+See [Getting started](https://mise.en.dev/getting-started.html) for more options.
 
 ```sh-session
 $ curl https://mise.run | sh
@@ -61,7 +71,7 @@ $ ~/.local/bin/mise --version
  / / / / / / (__  )  __/_____/  __/ / / /_____/ /_/ / / /_/ / /__/  __/
 /_/ /_/ /_/_/____/\___/      \___/_/ /_/     / .___/_/\__,_/\___/\___/
                                             /_/                 by @jdx
-2026.2.9 macos-arm64 (2026-02-10)
+2026.5.9 macos-arm64 (2026-05-15)
 ```
 
 Hook mise into your shell (pick the right one for your shell):
@@ -78,22 +88,22 @@ echo '~/.local/bin/mise activate pwsh | Out-String | Invoke-Expression' >> ~/.co
 ### Execute commands with specific tools
 
 ```sh-session
-$ mise exec node@24 -- node -v
-mise node@24.x.x ✓ installed
-v24.x.x
+$ mise exec node@26 -- node -v
+mise node@26.x.x ✓ installed
+v26.x.x
 ```
 
 ### Install tools
 
 ```sh-session
-$ mise use --global node@24 go@1
+$ mise use --global node@26 go@1
 $ node -v
-v24.x.x
+v26.x.x
 $ go version
 go version go1.x.x macos/arm64
 ```
 
-See [dev tools](https://mise.jdx.dev/dev-tools/) for more examples.
+See [dev tools](https://mise.en.dev/dev-tools/) for more examples.
 
 ### Manage environment variables
 
@@ -109,7 +119,7 @@ $ echo $SOME_VAR
 bar
 ```
 
-Note that `mise` can also [load `.env` files](https://mise.jdx.dev/environments/#env-directives).
+Note that `mise` can also [load `.env` files](https://mise.en.dev/environments/#env-directives).
 
 ### Run tasks
 
@@ -125,7 +135,7 @@ $ mise run build
 building...
 ```
 
-See [tasks](https://mise.jdx.dev/tasks/) for more information.
+See [tasks](https://mise.en.dev/tasks/) for more information.
 
 ### Example mise project
 
@@ -170,11 +180,11 @@ mise install # install tools specified in mise.toml
 mise run deploy
 ```
 
-Find more examples in the [mise cookbook](https://mise.jdx.dev/mise-cookbook/).
+Find more examples in the [mise cookbook](https://mise.en.dev/mise-cookbook/).
 
 ## Full Documentation
 
-See [mise.jdx.dev](https://mise.jdx.dev)
+See [mise.en.dev](https://mise.en.dev)
 
 ## GitHub Issues & Discussions
 
@@ -190,7 +200,13 @@ Please note the following discussion categories, which match how issues are ofte
 
 ## Special Thanks
 
-We're grateful for Cloudflare's support through [Project Alexandria](https://www.cloudflare.com/lp/project-alexandria/).
+<p>
+  <a href="https://namespace.so">
+    <img src="docs/public/namespace-logo.svg" alt="Namespace" width="64" height="64">
+  </a>
+  <br>
+  Thanks to <a href="https://namespace.so">Namespace</a> for providing CI services for mise.
+</p>
 
 ## Contributors
 

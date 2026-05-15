@@ -27,9 +27,16 @@ pub async fn fetch_versions(
 ) -> Result<Vec<String>> {
     use crate::http::HTTP;
 
-    // Fetch the content
-    let response = HTTP.get_text(version_list_url).await?;
-    let content = response.trim();
+    let content = if version_regex.is_some() {
+        // When a regex is provided, the caller expects to parse arbitrary
+        // content (including HTML directory listings), so bypass the HTML rejection
+        // in get_text.
+        let resp = HTTP.get_async(version_list_url).await?;
+        resp.text().await?
+    } else {
+        HTTP.get_text(version_list_url).await?
+    };
+    let content = content.trim();
 
     // Parse versions based on format
     parse_version_list(content, version_regex, version_json_path, version_expr)
@@ -88,9 +95,13 @@ pub fn parse_version_list(
         }
     }
 
-    // If no versions extracted yet, treat as line-separated or single version
-    // This provides fallback for all cases including failed JSON parsing
-    if versions.is_empty() {
+    // If no versions extracted yet and no explicit extraction method was provided,
+    // treat as line-separated or single version.
+    // When version_regex or version_expr is set, zero matches means the content
+    // didn't contain the expected data — don't fall through to line-splitting
+    // which would emit garbage (e.g. raw HTML lines as "versions").
+    let explicit_method = version_regex.is_some() || version_expr.is_some();
+    if versions.is_empty() && !explicit_method {
         for line in trimmed.lines() {
             let line = line.trim();
             // Skip empty lines and comments
@@ -362,7 +373,7 @@ mod tests {
             content,
             None,
             None,
-            Some(r#"fromJSON(body).releases | filter({#.channel == "stable"}) | map({#.version}) | sortVersions()"#),
+            Some(r#"fromJSON(body).releases | filter({ #.channel == "stable" }) | map({ #.version }) | sortVersions()"#),
         )
         .unwrap();
         assert_eq!(versions, vec!["1.0.0", "3.38.6", "3.38.7"]);
@@ -384,5 +395,19 @@ mod tests {
         assert!(versions.contains(&"0.1.0".to_string()));
         assert!(versions.contains(&"0.2.0".to_string()));
         assert!(versions.contains(&"1.0.0".to_string()));
+    }
+
+    #[test]
+    fn test_parse_with_version_expr_filter_keys_with_regex() {
+        // Test version_expr with filter + # matches for Julia-style JSON (keys with non-version entries)
+        let content = r#"{"1.0.0":{},"1.1.0":{},"nightly":{},"latest":{},"1.2.0-rc1":{}}"#;
+        let versions = parse_version_list(
+            content,
+            None,
+            None,
+            Some(r#"sortVersions(filter(keys(fromJSON(body)), { # matches "^\\d+\\.\\d+\\.\\d+(-[0-9A-Za-z\\.-]+)?$" }))"#),
+        )
+        .unwrap();
+        assert_eq!(versions, vec!["1.0.0", "1.1.0", "1.2.0-rc1"]);
     }
 }

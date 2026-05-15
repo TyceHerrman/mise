@@ -42,7 +42,7 @@ use crate::backend::static_helpers::{
     get_filename_from_url, install_artifact, lookup_with_fallback, template_string, verify_artifact,
 };
 use crate::backend::version_list;
-use crate::backend::{Backend, VersionInfo};
+use crate::backend::{Backend, VersionInfo, runtime_path_for_install_path};
 use crate::cli::args::BackendArg;
 use crate::config::{Config, Settings};
 use crate::file;
@@ -269,7 +269,7 @@ impl S3Backend {
 
     /// Fetch versions using the configured method (manifest or listing)
     async fn fetch_versions(&self, config: &Arc<Config>) -> Result<Vec<String>> {
-        let opts = config.get_tool_opts(&self.ba).await?.unwrap_or_default();
+        let opts = config.get_tool_opts_with_overrides(&self.ba).await?;
 
         // Try manifest-based version discovery first
         if let Some(manifest_url) = Self::get_opt(&opts, "version_list_url") {
@@ -313,7 +313,7 @@ impl S3Backend {
     ) -> Result<()> {
         let settings = Settings::get();
         let filename = file_path.file_name().unwrap().to_string_lossy();
-        let lockfile_enabled = settings.lockfile;
+        let lockfile_enabled = settings.lockfile_enabled();
 
         let platform_key = self.get_platform_key();
         let platform_info = tv.lock_platforms.entry(platform_key).or_default();
@@ -418,6 +418,23 @@ impl Backend for S3Backend {
         &self.ba
     }
 
+    fn mark_prereleases_from_version_pattern(&self) -> bool {
+        true
+    }
+
+    fn remote_version_listing_tool_option_keys(&self) -> &'static [&'static str] {
+        &[
+            "version_list_url",
+            "version_regex",
+            "version_json_path",
+            "version_expr",
+            "version_prefix",
+            "url",
+            "region",
+            "endpoint",
+        ]
+    }
+
     async fn install_operation_count(&self, tv: &ToolVersion, _ctx: &InstallContext) -> usize {
         let opts = tv.request.options();
         super::http_install_operation_count(
@@ -466,7 +483,7 @@ impl Backend for S3Backend {
 
         // For lockfile checksum verification
         let settings = Settings::get();
-        let lockfile_enabled = settings.lockfile;
+        let lockfile_enabled = settings.lockfile_enabled();
         let has_lockfile_checksum = tv
             .lock_platforms
             .get(&platform_key)
@@ -509,13 +526,16 @@ impl Backend for S3Backend {
         // Check for explicit bin_path
         if let Some(bin_path_template) = lookup_with_fallback(&opts, "bin_path") {
             let bin_path = template_string(&bin_path_template, tv);
-            return Ok(vec![tv.install_path().join(bin_path)]);
+            return Ok(vec![runtime_path_for_install_path(
+                tv,
+                tv.install_path().join(bin_path),
+            )]);
         }
 
         // Check for bin directory
         let bin_dir = tv.install_path().join("bin");
         if bin_dir.exists() {
-            return Ok(vec![bin_dir]);
+            return Ok(vec![runtime_path_for_install_path(tv, bin_dir)]);
         }
 
         // Search subdirectories for bin directories
@@ -533,9 +553,12 @@ impl Backend for S3Backend {
         }
 
         if paths.is_empty() {
-            Ok(vec![tv.install_path()])
+            Ok(vec![tv.runtime_path()])
         } else {
-            Ok(paths)
+            Ok(paths
+                .into_iter()
+                .map(|path| runtime_path_for_install_path(tv, path))
+                .collect())
         }
     }
 }

@@ -141,10 +141,8 @@ impl ErlangPlugin {
             &tarball_path,
             &tv.download_path(),
             &TarOptions {
-                strip_components: 0,
                 pr: Some(ctx.pr.as_ref()),
-                format: file::TarFormat::TarGz,
-                ..Default::default()
+                ..TarOptions::new(file::TarFormat::TarGz)
             },
         )?;
 
@@ -173,7 +171,7 @@ impl ErlangPlugin {
             let entry = entry?;
             let dest = tv.install_path().join(entry.file_name());
             trace!("moving {:?} to {:?}", entry.path(), &dest);
-            file::rename(entry.path(), dest)?;
+            file::move_file(entry.path(), dest)?;
         }
 
         Ok(())
@@ -228,10 +226,8 @@ impl ErlangPlugin {
             &tarball_path,
             &tv.install_path(),
             &TarOptions {
-                strip_components: 0,
                 pr: Some(ctx.pr.as_ref()),
-                format: file::TarFormat::TarGz,
-                ..Default::default()
+                ..TarOptions::new(file::TarFormat::TarGz)
             },
         )?;
         Ok(Some(tv))
@@ -344,10 +340,15 @@ impl Backend for ErlangPlugin {
                 .collect()
         } else {
             self.update_kerl().await?;
-            plugins::core::run_fetch_task_with_timeout(move || {
-                let output = cmd!(self.kerl_path(), "list", "releases", "all")
-                    .env("KERL_BASE_DIR", self.ba.cache_path.join("kerl"))
-                    .read()?;
+            let kerl_path = self.kerl_path().to_string_lossy().to_string();
+            let kerl_base_dir = self.ba.cache_path.join("kerl");
+            plugins::core::run_fetch_task_with_timeout_async(async move || {
+                let output = crate::cmd::cmd_read_async_inherited_env(
+                    &kerl_path,
+                    &["list", "releases", "all"],
+                    [("KERL_BASE_DIR", kerl_base_dir.as_os_str())],
+                )
+                .await?;
                 let versions = output
                     .split('\n')
                     .filter(|s| regex!(r"^[0-9].+$").is_match(s))
@@ -357,7 +358,8 @@ impl Backend for ErlangPlugin {
                     })
                     .collect();
                 Ok(versions)
-            })?
+            })
+            .await?
         };
         Ok(versions)
     }

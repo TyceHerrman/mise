@@ -10,7 +10,7 @@ use flate2::Compression;
 use flate2::write::{ZlibDecoder, ZlibEncoder};
 use indexmap::IndexSet;
 use itertools::Itertools;
-use serde_derive::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize};
 use std::sync::LazyLock as Lazy;
 
 use crate::cli::HookReason;
@@ -186,6 +186,33 @@ pub fn should_exit_early_fast() -> bool {
             return false;
         }
     }
+    // Check if any files accessed by tera template functions have been modified
+    for path in &PREV_SESSION.tera_files {
+        if let Ok(metadata) = path.metadata() {
+            if let Ok(modified) = metadata.modified()
+                && mtime_to_millis(modified) > PREV_SESSION.latest_update
+            {
+                return false;
+            }
+        } else if !path.exists() {
+            return false;
+        }
+    }
+    // Check if any files from [[watch_files]] patterns have been modified
+    for path in &PREV_SESSION.watch_files {
+        if let Ok(metadata) = path.metadata() {
+            if let Ok(modified) = metadata.modified()
+                && mtime_to_millis(modified) > PREV_SESSION.latest_update
+            {
+                return false;
+            }
+        } else if !path.exists() {
+            return false;
+        }
+    }
+    if have_trust_state_dirs_been_modified() {
+        return false;
+    }
     // Check if data dir has been modified (new tools installed, etc.)
     // Also check if it's been deleted - this requires a full update
     if !dirs::DATA.exists() {
@@ -199,29 +226,9 @@ pub fn should_exit_early_fast() -> bool {
     }
     // Check if any directory in the config search path has been modified
     // This catches new config files created anywhere in the hierarchy
-    if let Some(cwd) = &*dirs::CWD
-        && let Ok(ancestor_dirs) = file::all_dirs(cwd, &env::MISE_CEILING_PATHS)
-    {
-        // Config subdirectories that might contain config files
-        let config_subdirs = DEFAULT_CONFIG_FILENAMES
-            .iter()
-            .map(|f| Path::new(f).parent().and_then(|p| p.to_str()).unwrap_or(""))
-            .unique()
-            .collect::<Vec<_>>();
-        for dir in ancestor_dirs {
-            for subdir in &config_subdirs {
-                let check_dir = if subdir.is_empty() {
-                    dir.clone()
-                } else {
-                    dir.join(subdir)
-                };
-                if let Ok(metadata) = check_dir.metadata()
-                    && let Ok(modified) = metadata.modified()
-                    && mtime_to_millis(modified) > PREV_SESSION.latest_update
-                {
-                    return false;
-                }
-            }
+    for modified in config_search_dir_mtimes() {
+        if mtime_to_millis(modified) > PREV_SESSION.latest_update {
+            return false;
         }
     }
     // Filesystem checks passed - update the last check timestamp so subsequent
@@ -310,6 +317,22 @@ fn have_files_been_modified(watch_files: BTreeSet<PathBuf>) -> bool {
     modified
 }
 
+fn have_trust_state_dirs_been_modified() -> bool {
+    for path in [&*dirs::TRUSTED_CONFIGS, &*dirs::IGNORED_CONFIGS] {
+        if PREV_SESSION.watch_files.iter().any(|p| p == path) {
+            continue;
+        }
+        if let Ok(metadata) = path.metadata()
+            && let Ok(modified) = metadata.modified()
+            && mtime_to_millis(modified) > PREV_SESSION.latest_update
+        {
+            trace!("trust state dir modified: {:?}", path);
+            return true;
+        }
+    }
+    false
+}
+
 fn have_mise_env_vars_been_modified() -> bool {
     get_mise_env_vars_hashed() != PREV_SESSION.env_var_hash
 }
@@ -322,6 +345,14 @@ pub struct HookEnvSession {
     pub env: EnvMap,
     #[serde(default)]
     pub aliases: indexmap::IndexMap<String, String>,
+    /// Files accessed by tera template functions (read_file, hash_file, etc.)
+    /// that should be watched for changes.
+    #[serde(default)]
+    pub tera_files: Vec<PathBuf>,
+    /// Resolved file paths from [[watch_files]] config patterns and env plugin watch_files.
+    /// Stored so the fast-path can detect changes without loading config.
+    #[serde(default)]
+    pub watch_files: Vec<PathBuf>,
     dir: Option<PathBuf>,
     env_var_hash: String,
     latest_update: u128,
@@ -342,6 +373,34 @@ pub fn deserialize<T: serde::de::DeserializeOwned>(raw: String) -> Result<T> {
     Ok(rmp_serde::from_slice(&writer[..])?)
 }
 
+/// Collect mtimes for config-search ancestor directories.
+/// Used by both `should_exit_early_fast` and `build_session` to avoid divergence.
+fn config_search_dir_mtimes() -> Vec<SystemTime> {
+    let mut mtimes = Vec::new();
+    if let Some(cwd) = &*dirs::CWD
+        && let Ok(ancestor_dirs) = file::all_dirs(cwd, &env::MISE_CEILING_PATHS)
+    {
+        let config_subdirs = DEFAULT_CONFIG_FILENAMES
+            .iter()
+            .map(|f| Path::new(f).parent().and_then(|p| p.to_str()).unwrap_or(""))
+            .unique()
+            .collect::<Vec<_>>();
+        for dir in ancestor_dirs {
+            for subdir in &config_subdirs {
+                let check_dir = if subdir.is_empty() {
+                    dir.clone()
+                } else {
+                    dir.join(subdir)
+                };
+                if let Ok(Ok(modified)) = check_dir.metadata().map(|m| m.modified()) {
+                    mtimes.push(modified);
+                }
+            }
+        }
+    }
+    mtimes
+}
+
 pub async fn build_session(
     config: &Arc<Config>,
     env: EnvMap,
@@ -351,10 +410,28 @@ pub async fn build_session(
     config_paths: IndexSet<PathBuf>,
 ) -> Result<HookEnvSession> {
     let mut max_modtime = UNIX_EPOCH;
-    for cf in get_watch_files(watch_files)? {
+    let resolved_watch_files = get_watch_files(watch_files)?;
+    for cf in &resolved_watch_files {
         if let Ok(Ok(modified)) = cf.metadata().map(|m| m.modified()) {
             max_modtime = std::cmp::max(modified, max_modtime);
         }
+    }
+
+    // Include tera template files in max_modtime so latest_update reflects
+    // their mtimes even when watch_files comes from env_cache
+    for tf in &config.tera_files {
+        if let Ok(Ok(modified)) = tf.metadata().map(|m| m.modified()) {
+            max_modtime = std::cmp::max(modified, max_modtime);
+        }
+    }
+
+    // Keep latest_update aligned with the fast-path checks so a full hook-env run
+    // can stabilize subsequent prompts instead of repeatedly falling back.
+    if let Ok(Ok(modified)) = dirs::DATA.metadata().map(|m| m.modified()) {
+        max_modtime = std::cmp::max(modified, max_modtime);
+    }
+    for modified in config_search_dir_mtimes() {
+        max_modtime = std::cmp::max(modified, max_modtime);
     }
 
     let loaded_configs: IndexSet<PathBuf> = config.config_files.keys().cloned().collect();
@@ -377,6 +454,8 @@ pub async fn build_session(
         env_var_hash: get_mise_env_vars_hashed(),
         env,
         aliases,
+        tera_files: config.tera_files.clone(),
+        watch_files: resolved_watch_files.into_iter().collect(),
         loaded_configs,
         loaded_tools,
         config_paths,

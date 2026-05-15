@@ -15,7 +15,7 @@ impl TaskFetcher {
 
     /// Fetch remote task files, converting remote paths to local cached paths
     pub async fn fetch_tasks(&self, tasks: &mut Vec<Task>) -> Result<()> {
-        let no_cache = self.no_cache || Settings::get().task_remote_no_cache.unwrap_or(false);
+        let no_cache = self.no_cache || Settings::get().task.remote_no_cache.unwrap_or(false);
         let task_file_providers = TaskFileProvidersBuilder::new()
             .with_cache(!no_cache)
             .build();
@@ -48,7 +48,7 @@ impl TaskFetcher {
     }
 
     /// Check if a source path is a remote task file (git or http/https)
-    fn is_remote_source(source: &str) -> bool {
+    pub fn is_remote_source(source: &str) -> bool {
         source.starts_with("git::")
             || source.starts_with("http://")
             || source.starts_with("https://")

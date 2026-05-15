@@ -16,10 +16,10 @@ use crate::cli::args::BackendArg;
 use crate::cmd::CmdLineRunner;
 use crate::config::{Config, Settings};
 use crate::env::GITHUB_TOKEN;
+use crate::file;
 use crate::http::HTTP_FETCH;
 use crate::install_context::InstallContext;
 use crate::toolset::{ToolRequest, ToolVersion};
-use crate::{env, file};
 
 #[derive(Debug)]
 pub struct CargoBackend {
@@ -48,6 +48,10 @@ impl Backend for CargoBackend {
     /// It doesn't support installing from direct URLs, so lockfile URLs are not applicable.
     fn supports_lockfile_url(&self) -> bool {
         false
+    }
+
+    fn mark_prereleases_from_version_pattern(&self) -> bool {
+        true
     }
 
     async fn _list_remote_versions(&self, _config: &Arc<Config>) -> eyre::Result<Vec<VersionInfo>> {
@@ -86,6 +90,7 @@ impl Backend for CargoBackend {
         self.warn_if_dependency_missing(
             &ctx.config,
             "cargo",
+            &["rust", "cargo"],
             "To use cargo packages with mise, you need to install Rust first:\n\
               mise use rust@latest\n\n\
             Or install Rust via https://rustup.rs/",
@@ -119,14 +124,16 @@ impl Backend for CargoBackend {
                 cmd = cmd.env("GITHUB_TOKEN", token)
             }
             cmd.arg(install_arg)
-        } else if env::var("MISE_CARGO_BINSTALL_ONLY").is_ok_and(|v| v == "1") {
-            bail!("cargo-binstall is not available, but MISE_CARGO_BINSTALL_ONLY is set");
+        } else if Settings::get().cargo.binstall_only {
+            bail!("cargo-binstall is not available, but cargo.binstall_only is set");
         } else {
             cmd.arg(install_arg)
         };
 
         let opts = tv.request.options();
-        if let Some(bin) = lookup_platform_key(&opts, "bin").or_else(|| opts.get("bin").cloned()) {
+        if let Some(bin) =
+            lookup_platform_key(&opts, "bin").or_else(|| opts.get("bin").map(|s| s.to_string()))
+        {
             cmd = cmd.arg(format!("--bin={bin}"));
         }
         if opts
@@ -153,7 +160,8 @@ impl Backend for CargoBackend {
         cmd.arg("--root")
             .arg(tv.install_path())
             .with_pr(ctx.pr.as_ref())
-            .envs(ctx.ts.env_with_path(&ctx.config).await?)
+            .envs(ctx.ts.env_with_path_without_tools(&ctx.config).await?)
+            .envs(opts.install_env.clone())
             .prepend_path(ctx.ts.list_paths(&ctx.config).await)?
             .prepend_path(
                 self.dependency_toolset(&ctx.config)
@@ -177,7 +185,7 @@ impl Backend for CargoBackend {
         // These options affect what gets compiled/installed
         for key in ["features", "default-features", "bin"] {
             if let Some(value) = opts.get(key) {
-                result.insert(key.to_string(), value.clone());
+                result.insert(key.to_string(), value.to_string());
             }
         }
 

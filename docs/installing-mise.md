@@ -78,7 +78,7 @@ If you want to verify the install script hasn't been tampered with:
 
 ```sh
 gpg --keyserver hkps://keys.openpgp.org --recv-keys 24853EC9F655CE80B48E6C3A8B81C9D17413A06D
-curl https://mise.jdx.dev/install.sh.sig | gpg --decrypt > install.sh
+curl https://mise.en.dev/install.sh.sig | gpg --decrypt > install.sh
 # ensure the above is signed with the mise release key
 sh ./install.sh
 ```
@@ -130,8 +130,8 @@ For older Ubuntu/Debian versions:
 ```sh
 sudo apt update -y && sudo apt install -y curl
 sudo install -dm 755 /etc/apt/keyrings
-curl -fSs https://mise.jdx.dev/gpg-key.pub | sudo tee /etc/apt/keyrings/mise-archive-keyring.asc 1> /dev/null
-echo "deb [signed-by=/etc/apt/keyrings/mise-archive-keyring.asc] https://mise.jdx.dev/deb stable main" | sudo tee /etc/apt/sources.list.d/mise.list
+curl -fSs https://mise.en.dev/gpg-key.pub | sudo tee /etc/apt/keyrings/mise-archive-keyring.asc 1> /dev/null
+echo "deb [signed-by=/etc/apt/keyrings/mise-archive-keyring.asc] https://mise.en.dev/deb stable main" | sudo tee /etc/apt/sources.list.d/mise.list
 sudo apt update -y
 sudo apt install -y mise
 ```
@@ -151,7 +151,7 @@ sudo pacman -S mise
 Build from source with Cargo:
 
 ```sh
-cargo install mise
+cargo install --locked mise
 ```
 
 Do it faster with [cargo-binstall](https://github.com/cargo-bins/cargo-binstall):
@@ -169,10 +169,21 @@ cargo install mise --git https://github.com/jdx/mise --branch main
 
 ### dnf
 
-#### Fedora 41+, RHEL 9+, CentOS Stream 9+
+#### Fedora 41+, CentOS Stream 9+, RHEL 10+
 
 ```sh
 dnf copr enable jdxcode/mise
+dnf install mise
+```
+
+#### RHEL 9 / AlmaLinux 9 / Rocky 9
+
+RHEL 9 AppStream is currently frozen at Rust 1.88, which is older than mise's
+minimum supported Rust version. Use the CentOS Stream 9 build instead — the
+resulting binary works on RHEL 9 derivatives:
+
+```sh
+dnf copr enable jdxcode/mise centos-stream+epel-next-9
 dnf install mise
 ```
 
@@ -188,19 +199,24 @@ sudo snap install mise --classic --beta
 
 ### Docker
 
-```sh
-docker run jdxcode/mise x node@20 -- node -v
-```
-
-[Docker Hub](https://hub.docker.com/r/jdxcode/mise)
+See the [Docker cookbook](/mise-cookbook/docker) for tips on using mise with Docker.
 
 ::: details Example Dockerfile
 
 ```dockerfile
-FROM jdxcode/mise:latest AS mise
+FROM debian:13-slim
 
-FROM debian:bookworm-slim
-COPY --from=mise /usr/local/bin/mise /usr/local/bin/mise
+RUN apt-get update \
+    && apt-get -y --no-install-recommends install sudo curl git ca-certificates build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+ENV MISE_DATA_DIR="/mise"
+ENV MISE_CONFIG_DIR="/mise"
+ENV MISE_CACHE_DIR="/mise/cache"
+ENV MISE_INSTALL_PATH="/usr/local/bin/mise"
+ENV PATH="/mise/shims:$PATH"
+RUN curl https://mise.run | sh
 RUN mise trust -a && mise install
 ```
 
@@ -268,14 +284,14 @@ For precompiled binaries, enable [nix-ld](https://github.com/Mic92/nix-ld) and d
 
 ```sh
 yum install -y yum-utils
-yum-config-manager --add-repo https://mise.jdx.dev/rpm/mise.repo
+yum-config-manager --add-repo https://mise.en.dev/rpm/mise.repo
 yum install -y mise
 ```
 
 ### zypper
 
 ```sh
-sudo wget https://mise.jdx.dev/rpm/mise.repo -O /etc/zypp/repos.d/mise.repo
+sudo wget https://mise.en.dev/rpm/mise.repo -O /etc/zypp/repos.d/mise.repo
 sudo zypper refresh
 sudo zypper install mise
 ```
@@ -450,7 +466,6 @@ mise completion bash --include-bash-completion-lib > ~/.local/share/bash-complet
 ```sh [zsh]
 # If you use oh-my-zsh, there is a `mise` plugin. Update your .zshrc file with:
 # plugins=(... mise)
-# This must be after `source $ZSH/oh-my-zsh.sh` line in your .zshrc file.
 
 # Otherwise, look where zsh search for completions with
 echo $fpath | tr ' ' '\n'

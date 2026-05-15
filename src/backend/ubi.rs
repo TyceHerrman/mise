@@ -1,6 +1,7 @@
 use crate::backend::VersionInfo;
 use crate::backend::backend_type::BackendType;
 use crate::backend::platform_target::PlatformTarget;
+use crate::backend::runtime_path_for_install_path;
 use crate::backend::static_helpers::{lookup_platform_key, try_with_v_prefix};
 use crate::cli::args::BackendArg;
 use crate::config::{Config, Settings};
@@ -39,14 +40,28 @@ impl Backend for UbiBackend {
         &self.ba
     }
 
-    async fn _list_remote_versions(&self, _config: &Arc<Config>) -> eyre::Result<Vec<VersionInfo>> {
+    fn mark_prereleases_from_version_pattern(&self) -> bool {
+        true
+    }
+
+    fn remote_version_listing_tool_option_keys(&self) -> &'static [&'static str] {
+        &["provider", "api_url", "tag_regex"]
+    }
+
+    async fn _list_remote_versions(&self, config: &Arc<Config>) -> eyre::Result<Vec<VersionInfo>> {
+        deprecated_at!(
+            "2026.4.0",
+            "2027.1.0",
+            "ubi",
+            "The ubi backend is deprecated. Use the github backend instead (e.g., github:owner/repo)."
+        );
         if name_is_url(&self.tool_name()) {
             Ok(vec![VersionInfo {
                 version: "latest".to_string(),
                 ..Default::default()
             }])
         } else {
-            let opts = self.ba.opts();
+            let opts = config.get_tool_opts_with_overrides(&self.ba).await?;
             let forge = match opts.get("provider") {
                 Some(forge) => ForgeType::from_str(forge)?,
                 None => ForgeType::default(),
@@ -193,9 +208,11 @@ impl Backend for UbiBackend {
         ctx: &InstallContext,
         mut tv: ToolVersion,
     ) -> eyre::Result<ToolVersion> {
-        deprecated!(
+        deprecated_at!(
+            "2026.4.0",
+            "2027.1.0",
             "ubi",
-            "The ubi backend is deprecated. Use the github backend instead (e.g., github:owner/repo)"
+            "The ubi backend is deprecated. Use the github backend instead (e.g., github:owner/repo)."
         );
         // Check if lockfile has URL for this platform
         let platform_key = self.get_platform_key();
@@ -207,20 +224,16 @@ impl Backend for UbiBackend {
         let v = tv.version.to_string();
         let opts = tv.request.options();
         let bin_path = lookup_platform_key(&opts, "bin_path")
-            .or_else(|| opts.get("bin_path").cloned())
+            .or_else(|| opts.get("bin_path").map(|s| s.to_string()))
             .unwrap_or_else(|| "bin".to_string());
         let extract_all = opts.get("extract_all").is_some_and(|v| v == "true");
         let bin_dir = tv.install_path();
 
         // Use lockfile URL if available, otherwise fall back to standard resolution
         if let Some(url) = &lockfile_url {
-            install(url, &v, &bin_dir, extract_all, &opts)
-                .await
-                .map_err(|e| eyre::eyre!(e))?;
+            install(url, &v, &bin_dir, extract_all, &opts).await?;
         } else if name_is_url(&self.tool_name()) {
-            install(&self.tool_name(), &v, &bin_dir, extract_all, &opts)
-                .await
-                .map_err(|e| eyre::eyre!(e))?;
+            install(&self.tool_name(), &v, &bin_dir, extract_all, &opts).await?;
         } else {
             try_with_v_prefix(&v, None, |candidate| {
                 let opts = opts.clone();
@@ -243,7 +256,7 @@ impl Backend for UbiBackend {
             tv.request
                 .options()
                 .get("exe")
-                .cloned()
+                .map(|s| s.to_string())
                 .unwrap_or(tv.ba().short.to_string()),
         ];
         if cfg!(windows) {
@@ -273,7 +286,12 @@ impl Backend for UbiBackend {
         Ok(tv)
     }
 
-    fn fuzzy_match_filter(&self, versions: Vec<String>, query: &str) -> Vec<String> {
+    fn fuzzy_match_filter(
+        &self,
+        versions: Vec<String>,
+        query: &str,
+        filter_prereleases: bool,
+    ) -> Vec<String> {
         let escaped_query = regex::escape(query);
         let query = if query == "latest" {
             "\\D*[0-9].*"
@@ -288,7 +306,7 @@ impl Backend for UbiBackend {
                 if query == v {
                     return true;
                 }
-                if VERSION_REGEX.is_match(v) {
+                if filter_prereleases && VERSION_REGEX.is_match(v) {
                     return false;
                 }
                 query_regex.is_match(v)
@@ -326,7 +344,7 @@ impl Backend for UbiBackend {
             } else {
                 bail!("Invalid checksum: {platform_key}");
             }
-        } else if Settings::get().lockfile {
+        } else if Settings::get().lockfile_enabled() {
             ctx.pr
                 .set_message(format!("checksum generate {platform_key}"));
             let hash = hash::file_hash_blake3(file, Some(ctx.pr.as_ref()))?;
@@ -341,21 +359,30 @@ impl Backend for UbiBackend {
         tv: &ToolVersion,
     ) -> eyre::Result<Vec<std::path::PathBuf>> {
         let opts = tv.request.options();
-        if let Some(bin_path) =
-            lookup_platform_key(&opts, "bin_path").or_else(|| opts.get("bin_path").cloned())
+        if let Some(bin_path) = lookup_platform_key(&opts, "bin_path")
+            .or_else(|| opts.get("bin_path").map(|s| s.to_string()))
         {
             // bin_path should always point to a directory containing binaries
-            Ok(vec![tv.install_path().join(&bin_path)])
+            Ok(vec![runtime_path_for_install_path(
+                tv,
+                tv.install_path().join(&bin_path),
+            )])
         } else if opts.get("extract_all").is_some_and(|v| v == "true") {
-            Ok(vec![tv.install_path()])
+            Ok(vec![tv.runtime_path()])
         } else {
             let bin_path = tv.install_path().join("bin");
             if bin_path.exists() {
-                Ok(vec![bin_path])
+                Ok(vec![runtime_path_for_install_path(tv, bin_path)])
             } else {
-                Ok(vec![tv.install_path()])
+                Ok(vec![tv.runtime_path()])
             }
         }
+    }
+
+    /// UBI is deprecated in favor of the github backend and doesn't resolve download URLs
+    /// at lock time. Return false so --locked mode doesn't error for ubi tools.
+    fn supports_lockfile_url(&self) -> bool {
+        false
     }
 
     fn resolve_lockfile_options(
@@ -369,7 +396,7 @@ impl Backend for UbiBackend {
         // These options affect which artifact is downloaded
         for key in ["exe", "matching", "matching_regex", "provider"] {
             if let Some(value) = opts.get(key) {
-                result.insert(key.to_string(), value.clone());
+                result.insert(key.to_string(), value.to_string());
             }
         }
 
@@ -439,7 +466,7 @@ async fn install(
     bin_dir: &Path,
     extract_all: bool,
     opts: &ToolVersionOptions,
-) -> anyhow::Result<()> {
+) -> eyre::Result<()> {
     let mut builder = UbiBuilder::new().install_dir(bin_dir);
 
     if name_is_url(name) {
@@ -481,7 +508,7 @@ async fn install(
         builder = set_enterprise_token(builder, &forge);
     }
 
-    let mut ubi = builder.build()?;
+    let mut ubi = builder.build().map_err(|e| eyre::eyre!("{e:#}"))?;
 
     // TODO: hacky but does not compile without it
     tokio::task::block_in_place(|| {
@@ -492,5 +519,6 @@ async fn install(
                 .unwrap()
         });
         RT.block_on(async { ubi.install_binary().await })
+            .map_err(|e| eyre::eyre!("{e:#}"))
     })
 }

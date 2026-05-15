@@ -32,8 +32,7 @@ so make sure before you start working on something it won't be a wasted effort.
 
 1. **Disable mise during development**: If you use mise in your shell, disable
    it when running tests to avoid conflicts
-2. **Use dev container**: Docker setup available (currently needs fixing)
-3. **Test specific features**: Use `cargo test test_name` for targeted testing
+2. **Test specific features**: Use `cargo test test_name` for targeted testing
 4. **Update snapshots**: Use `mise run snapshots` when changing test outputs
 5. **Rate limiting**: Set `MISE_GITHUB_TOKEN` to avoid GitHub API rate limits
    during development
@@ -362,28 +361,6 @@ Use `mise tasks` to see all available development tasks:
 Shouldn't require anything special I'm aware of, but `mise run build` is a good
 sanity check to run and make sure it's all working.
 
-## Dev Container
-
-::: danger
-The docker setup quit working and since I don't use it I haven't bothered to
-fix it. For now you'll need to run outside of docker or you can try to fix the
-docker setup.
-:::
-
-There is a docker setup that makes development with mise easier. It is
-especially helpful for running the E2E tests.
-Here's some example ways to use it:
-
-```sh
-mise run docker:cargo build
-mise run docker:cargo test
-mise run docker:mise --help # run `mise --help` in the dev container
-# run the e2e tests inside of the docker container
-mise run docker:mise run test:e2e
-# shortcut for `mise run docker:mise run test:e2e`
-mise run docker:e2e
-```
-
 ## Pre-commit Hooks & Code Quality
 
 mise uses [hk](https://hk.jdx.dev) as its git hook manager for
@@ -428,38 +405,20 @@ hk check --step prettier
 hk check --step shellcheck
 ```
 
-### Pre-commit Task Configuration
-
-mise defines a `pre-commit` task that runs the main linting checks:
-
-```toml
-[pre-commit]
-env = { PRE_COMMIT = 1 }
-run = ["mise run lint"]
-```
-
-This task:
-
-1. Sets `PRE_COMMIT=1` environment variable
-2. Runs `mise run lint`, which executes `hk check --all`
-
 ### Setting Up Pre-commit Hooks
 
 ```bash
-# Set up git hook to run mise's pre-commit task
-mise generate git-pre-commit --write --task=pre-commit
+# Set up git hooks to run hk on pre-commit
+hk install --mise
 ```
 
-### Running Pre-commit Checks Manually
+### Running Checks Manually
 
 ```bash
-# Run all pre-commit checks
-mise run pre-commit
+# Run all checks
+hk check --all
 
-# Run specific linting checks
-mise run lint
-
-# Run linting with fixes
+# Run checks with fixes
 hk fix --all
 
 # Run checks on specific files
@@ -468,8 +427,7 @@ hk check --files="src/**/*.rs"
 
 ## Running the CLI
 
-Even if using the devcontainer, it's a good idea to create a shim to make it
-easy to launch mise. I use the following shim in `~/.local/bin/@mise`:
+I use the following shim in `~/.local/bin/@mise`:
 
 ```sh
 #!/bin/sh
@@ -484,7 +442,6 @@ Then if that is in PATH just use `@mise` to run mise by compiling it on the fly.
 
 ```sh
 @mise --help
-@mise run docker:e2e
 eval "$(@mise activate zsh)"
 @mise activate fish | source
 ```
@@ -667,13 +624,54 @@ of the full backend specification.
 When adding a new tool, the following requirements apply (automatically
 enforced by [GitHub Actions workflow](https://github.com/jdx/mise/blob/main/.github/workflows/registry_comment.yml)):
 
-- **New asdf plugins are not accepted** - Use aqua/github instead
 - **A test is required in `registry/`** - Must include a `test` field to
-  verify installation
+  verify installation.
 - **Tools may be rejected if they are not notable** - The tool should be
   reasonably popular and well-maintained. There are no specific guidelines for this and
   a lot of factors are taken into account. @jdx won't explain why a given tool wasn't
-  accepted.
+  accepted. Include a brief popularity summary (stars, downloads, recent release date) in
+  the PR description so the policy can be applied without re-doing the research.
+
+#### Backend acceptance tiers
+
+Which backend you choose for a registry entry matters as much as which tool you
+add. Backends fall into the following tiers:
+
+**Tier 1 — preferred, routinely accepted:** [`aqua`](/dev-tools/backends/aqua.html),
+[`github`](/dev-tools/backends/github.html), and [`gitlab`](/dev-tools/backends/gitlab.html).
+
+- Prefer `aqua` when the tool is in the [aqua registry](https://github.com/aquaproj/aqua-registry) —
+  it has better UX, SLSA verification, and per-version logic.
+- Use `github` when the tool isn't in aqua but ships GitHub releases.
+- Use `gitlab` for tools released through GitLab.
+
+**Tier 2 — high bar, but lower than tier 3:** [`conda`](/dev-tools/backends/conda.html).
+
+Potentially accepted for tools that can't reasonably be supported via aqua/github.
+The bar is lower than tier 3 because **mise's conda backend does not require a
+separately-installed package manager** — packages are downloaded and extracted
+directly from anaconda.org, with no `conda`/`mamba`/`micromamba` needed on the
+user's PATH. The tool still needs to be popular and well-maintained.
+
+**Tier 3 — very high bar, rarely accepted:** `npm`, `pipx`, `gem`, `cargo`, `go`,
+`dotnet`.
+
+These all depend on a separately-installed runtime or toolchain being present on
+the user's PATH (`node`, `python`, `ruby`, `cargo`, `go`, `dotnet`), which is
+fragile — `npm`/`pipx`/`gem` in particular silently bind tools to whichever
+`node`/`python`/`ruby` happened to be on PATH at install time, which breaks when
+versions change or the runtime isn't installed. Accepted only when no aqua/github
+option exists and the tool is widely used. Discuss with @jdx before submitting.
+
+**Not accepted:** `asdf`, `vfox`, `ubi`.
+
+- **New `asdf` plugins** — supply-chain security. Use [aqua](/dev-tools/backends/aqua.html) or [github](/dev-tools/backends/github.html) instead.
+- **New `vfox` plugins** — same reason. Use aqua/github instead.
+- **`ubi`** is deprecated and is not accepted for new registry entries.
+
+Users can still install via any backend themselves with explicit syntax
+(`mise use vfox:owner/repo`, `mise use cargo:name`, etc.) — they just don't get
+a registry shorthand for it.
 
 ### Registry Format
 
@@ -706,14 +704,19 @@ backend, but can override with explicit syntax like `mise use aqua:owner/repo`.
 All tools must include a test to verify proper installation:
 
 ```toml
-test = [
-    "command-to-run",
-    "expected-output-pattern"
-]
+test = { cmd = "command-to-run", expected = "expected-output-pattern" }
 ```
 
 The test command should be reliable and the output pattern should use
-`{{version}}` to match any version number.
+<code v-pre>{{version}}</code> to match any version number.
+
+If `test.cmd` needs extra mise-managed tools on PATH, declare them with
+`test.tools`. This is used only by `mise test-tool`; it does not affect normal
+tool installation.
+
+```toml
+test = { cmd = "gradle -V", expected = "Gradle", tools = ["java"] }
+```
 
 ### Registry Examples
 
@@ -859,9 +862,9 @@ docker run -ti --rm ubuntu
 apt update -y
 apt install -y curl
 install -dm 755 /etc/apt/keyrings
-curl -fSso /etc/apt/keyrings/mise-archive-keyring.pub https://mise.jdx.dev/gpg-key.pub
+curl -fSso /etc/apt/keyrings/mise-archive-keyring.pub https://mise.en.dev/gpg-key.pub
 echo "deb [signed-by=/etc/apt/keyrings/mise-archive-keyring.pub arch=arm64] \
-https://mise.jdx.dev/deb stable main" >/etc/apt/sources.list.d/mise.list
+https://mise.en.dev/deb stable main" >/etc/apt/sources.list.d/mise.list
 apt update -y
 apt install -y mise
 mise -V

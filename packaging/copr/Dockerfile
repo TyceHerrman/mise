@@ -1,4 +1,4 @@
-FROM fedora:43@sha256:6cd815d862109208adf6040ea13391fe6aeb87a9dc80735c2ab07083fdf5e03a
+FROM fedora:45@sha256:8b838b3253cb855b1e5c3e1366fd0cda28cd1cc4c3517d625847172fd4ac6869
 LABEL maintainer="jdx"
 
 # Install packaging dependencies
@@ -15,8 +15,9 @@ RUN dnf update -y && \
         gzip && \
     dnf clean all
 
-# Install copr-cli
-RUN pip3 install copr-cli
+# Install copr-cli via dnf to ensure dependencies are properly managed and to avoid potential issues with manual installation
+RUN dnf install -y copr-cli && \
+    dnf clean all
 
 # Add mise to PATH
 ENV PATH="/root/.local/bin:${PATH}"

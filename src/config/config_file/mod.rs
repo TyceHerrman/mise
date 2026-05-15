@@ -13,21 +13,24 @@ use crate::config::config_file::min_version::MinVersionSpec;
 use crate::config::config_file::mise_toml::{MiseToml, MonorepoConfig};
 use crate::config::env_directive::EnvDirective;
 use crate::config::{AliasMap, Settings, settings};
+use crate::deps::DepsConfig;
 use crate::errors::Error::UntrustedConfig;
 use crate::file::display_path;
 use crate::hash::hash_to_str;
 use crate::hooks::Hook;
-use crate::prepare::PrepareConfig;
 use crate::redactions::Redactions;
 use crate::task::{Task, TaskTemplate};
 use crate::toolset::{ToolRequest, ToolRequestSet, ToolSource, ToolVersionList, Toolset};
 use crate::ui::{prompt, style};
 use crate::watch_files::WatchFile;
-use crate::{backend, config, dirs, env, file, hash};
+use crate::{
+    backend::{self, Backend},
+    config, dirs, env, file, hash,
+};
 use eyre::{Result, eyre};
 use idiomatic_version::IdiomaticVersionFile;
 use indexmap::IndexMap;
-use serde_derive::Deserialize;
+use serde::Deserialize;
 use std::sync::LazyLock as Lazy;
 use tool_versions::ToolVersions;
 
@@ -45,7 +48,7 @@ pub mod tool_versions;
 pub enum ConfigFileType {
     MiseToml,
     ToolVersions,
-    IdiomaticVersion,
+    IdiomaticVersion(Vec<Arc<dyn Backend>>),
 }
 
 pub trait ConfigFile: Debug + Send + Sync {
@@ -65,7 +68,7 @@ pub trait ConfigFile: Debug + Send + Sync {
         match p.parent() {
             Some(dir) => match dir {
                 dir if dir.starts_with(*dirs::CONFIG) => None,
-                dir if dir.starts_with(*dirs::SYSTEM) => None,
+                dir if dir.starts_with(*dirs::SYSTEM_CONFIG) => None,
                 dir if dir == *dirs::HOME => None,
                 _ => Some(config_root::config_root(p)),
             },
@@ -135,7 +138,11 @@ pub trait ConfigFile: Debug + Send + Sync {
         Ok(Default::default())
     }
 
-    fn prepare_config(&self) -> Option<PrepareConfig> {
+    fn deps_config(&self) -> Option<DepsConfig> {
+        None
+    }
+
+    fn oci_config(&self) -> Option<crate::oci::OciConfig> {
         None
     }
 }
@@ -244,9 +251,11 @@ async fn init(path: &Path) -> Arc<dyn ConfigFile> {
     match detect_config_file_type(path).await {
         Some(ConfigFileType::MiseToml) => Arc::new(MiseToml::init(path)),
         Some(ConfigFileType::ToolVersions) => Arc::new(ToolVersions::init(path)),
-        Some(ConfigFileType::IdiomaticVersion) => {
-            Arc::new(IdiomaticVersionFile::init(path.to_path_buf()))
-        }
+        Some(ConfigFileType::IdiomaticVersion(backends)) => Arc::new(
+            IdiomaticVersionFile::parse(path.to_path_buf(), backends)
+                .await
+                .expect("failed to parse idiomatic version file"),
+        ),
         _ => panic!("Unknown config file type: {}", path.display()),
     }
 }
@@ -273,9 +282,9 @@ pub async fn parse(path: &Path) -> Result<Arc<dyn ConfigFile>> {
     match detect_config_file_type(path).await {
         Some(ConfigFileType::MiseToml) => Ok(Arc::new(MiseToml::from_file(path)?)),
         Some(ConfigFileType::ToolVersions) => Ok(Arc::new(ToolVersions::from_file(path)?)),
-        Some(ConfigFileType::IdiomaticVersion) => {
-            Ok(Arc::new(IdiomaticVersionFile::from_file(path).await?))
-        }
+        Some(ConfigFileType::IdiomaticVersion(backends)) => Ok(Arc::new(
+            IdiomaticVersionFile::parse(path.to_path_buf(), backends).await?,
+        )),
         #[allow(clippy::box_default)]
         _ => Ok(Arc::new(MiseToml::default())),
     }
@@ -300,11 +309,12 @@ pub fn trust_check(path: &Path) -> eyre::Result<()> {
         return Ok(());
     }
     if cmd != "hook-env" && !is_ignored(&config_root) && !is_ignored(path) {
-        let ans = prompt::confirm_with_all(format!(
-            "{} config files in {} are not trusted. Trust them?",
-            style::eyellow("mise"),
-            style::epath(&config_root)
-        ))?;
+        let ans = (settings::is_loaded() && Settings::get().yes)
+            || prompt::confirm_with_all(format!(
+                "{} config files in {} are not trusted. Trust them?",
+                style::eyellow("mise"),
+                style::epath(&config_root)
+            ))?;
         if ans {
             trust(&config_root)?;
             return Ok(());
@@ -352,7 +362,7 @@ pub fn is_trusted(path: &Path) -> bool {
     {
         let mut current = parent;
         while let Some(dir) = current.parent() {
-            let monorepo_marker = trust_path(dir).with_extension("monorepo");
+            let monorepo_marker = with_appended_extension(&trust_path(dir), "monorepo");
             if monorepo_marker.exists() {
                 add_trusted(canonicalized_path.to_path_buf());
                 return true;
@@ -434,7 +444,7 @@ pub fn trust(path: &Path) -> Result<()> {
         file::make_symlink_or_file(path.canonicalize()?.as_path(), &hashed_path)?;
     }
     if Settings::get().paranoid {
-        let trust_hash_path = hashed_path.with_extension("hash");
+        let trust_hash_path = with_appended_extension(&hashed_path, "hash");
         let hash = hash::file_hash_sha256(path, None)?;
         file::write(trust_hash_path, hash)?;
     }
@@ -445,7 +455,7 @@ pub fn trust(path: &Path) -> Result<()> {
 pub fn mark_as_monorepo_root(path: &Path) -> Result<()> {
     let config_root = config_trust_root(path);
     let hashed_path = trust_path(&config_root);
-    let monorepo_marker = hashed_path.with_extension("monorepo");
+    let monorepo_marker = with_appended_extension(&hashed_path, "monorepo");
     if !monorepo_marker.exists() {
         file::create_dir_all(monorepo_marker.parent().unwrap())?;
         file::write(&monorepo_marker, "")?;
@@ -457,7 +467,15 @@ pub fn untrust(path: &Path) -> eyre::Result<()> {
     rm_ignored(path.to_path_buf())?;
     let hashed_path = trust_path(path);
     if hashed_path.exists() {
-        file::remove_file(hashed_path)?;
+        file::remove_file(&hashed_path)?;
+    }
+    let hash_path = with_appended_extension(&hashed_path, "hash");
+    if hash_path.exists() {
+        file::remove_file(&hash_path)?;
+    }
+    let monorepo_path = with_appended_extension(&hashed_path, "monorepo");
+    if monorepo_path.exists() {
+        file::remove_file(&monorepo_path)?;
     }
     Ok(())
 }
@@ -469,6 +487,20 @@ fn trust_path(path: &Path) -> PathBuf {
 
 fn ignore_path(path: &Path) -> PathBuf {
     dirs::IGNORED_CONFIGS.join(hashed_path_filename(path))
+}
+
+/// Appends an extension to a path without replacing existing dots in the filename.
+/// Unlike `Path::with_extension`, this preserves the full filename.
+/// e.g. "foo-bar.toml-abc123" + "hash" → "foo-bar.toml-abc123.hash"
+///
+/// NOTE: This changes the filename convention for .hash and .monorepo files.
+/// Existing files from prior versions will not be found, requiring a one-time
+/// re-trust of previously trusted configs after upgrade.
+fn with_appended_extension(path: &Path, ext: &str) -> PathBuf {
+    let mut os_string = path.as_os_str().to_owned();
+    os_string.push(".");
+    os_string.push(ext);
+    PathBuf::from(os_string)
 }
 
 /// creates the filename portion of trust/ignore files, e.g.:
@@ -504,7 +536,7 @@ fn hashed_path_filename(path: &Path) -> String {
 
 fn trust_file_hash(path: &Path) -> eyre::Result<bool> {
     let trust_path = trust_path(path);
-    let trust_hash_path = trust_path.with_extension("hash");
+    let trust_hash_path = with_appended_extension(&trust_path, "hash");
     if !trust_hash_path.exists() {
         return Ok(false);
     }
@@ -513,20 +545,20 @@ fn trust_file_hash(path: &Path) -> eyre::Result<bool> {
     Ok(hash == actual)
 }
 
-async fn filename_is_idiomatic(file_name: String) -> bool {
+async fn filename_is_idiomatic(file_name: String) -> Option<Vec<Arc<dyn Backend>>> {
+    let mut backends = vec![];
     for b in backend::list() {
         match b.idiomatic_filenames().await {
-            Ok(filenames) => {
-                if filenames.contains(&file_name) {
-                    return true;
-                }
-            }
-            Err(e) => {
-                debug!("idiomatic_filenames failed for {}: {:?}", b, e);
-            }
+            Ok(filenames) if filenames.contains(&file_name) => backends.push(b),
+            Err(e) => debug!("idiomatic_filenames failed for {}: {:?}", b, e),
+            _ => {}
         }
     }
-    false
+    if backends.is_empty() {
+        None
+    } else {
+        Some(backends)
+    }
 }
 
 async fn detect_config_file_type(path: &Path) -> Option<ConfigFileType> {
@@ -535,7 +567,6 @@ async fn detect_config_file_type(path: &Path) -> Option<ConfigFileType> {
         .and_then(|f| f.to_str())
         .unwrap_or("mise.toml")
     {
-        f if filename_is_idiomatic(f.to_string()).await => Some(ConfigFileType::IdiomaticVersion),
         f if env::MISE_OVERRIDE_TOOL_VERSIONS_FILENAMES
             .as_ref()
             .is_some_and(|o| o.contains(f)) =>
@@ -545,10 +576,17 @@ async fn detect_config_file_type(path: &Path) -> Option<ConfigFileType> {
         f if env::MISE_DEFAULT_TOOL_VERSIONS_FILENAME.as_str() == f => {
             Some(ConfigFileType::ToolVersions)
         }
-        f if f.ends_with(".toml") => Some(ConfigFileType::MiseToml),
         f if env::MISE_OVERRIDE_CONFIG_FILENAMES.contains(f) => Some(ConfigFileType::MiseToml),
         f if env::MISE_DEFAULT_CONFIG_FILENAME.as_str() == f => Some(ConfigFileType::MiseToml),
-        _ => None,
+        f => {
+            if let Some(backends) = filename_is_idiomatic(f.to_string()).await {
+                Some(ConfigFileType::IdiomaticVersion(backends))
+            } else if f.ends_with(".toml") {
+                Some(ConfigFileType::MiseToml)
+            } else {
+                None
+            }
+        }
     }
 }
 
@@ -589,14 +627,14 @@ mod tests {
     #[tokio::test]
     async fn test_detect_config_file_type() {
         env::set_var("MISE_EXPERIMENTAL", "true");
-        assert_eq!(
+        assert!(matches!(
             detect_config_file_type(Path::new("/foo/bar/.nvmrc")).await,
-            Some(ConfigFileType::IdiomaticVersion)
-        );
-        assert_eq!(
+            Some(ConfigFileType::IdiomaticVersion(_))
+        ));
+        assert!(matches!(
             detect_config_file_type(Path::new("/foo/bar/.ruby-version")).await,
-            Some(ConfigFileType::IdiomaticVersion)
-        );
+            Some(ConfigFileType::IdiomaticVersion(_))
+        ));
         assert_eq!(
             detect_config_file_type(Path::new("/foo/bar/.test-tool-versions")).await,
             Some(ConfigFileType::ToolVersions)
@@ -605,9 +643,25 @@ mod tests {
             detect_config_file_type(Path::new("/foo/bar/mise.toml")).await,
             Some(ConfigFileType::MiseToml)
         );
-        assert_eq!(
+        assert!(matches!(
             detect_config_file_type(Path::new("/foo/bar/rust-toolchain.toml")).await,
-            Some(ConfigFileType::IdiomaticVersion)
+            Some(ConfigFileType::IdiomaticVersion(_))
+        ));
+    }
+
+    #[test]
+    fn test_with_appended_extension() {
+        let path = Path::new("/tmp/trusted/infra-mise.toml-a1b2c3d4e5f67890");
+        let result = with_appended_extension(path, "hash");
+        assert_eq!(
+            result,
+            Path::new("/tmp/trusted/infra-mise.toml-a1b2c3d4e5f67890.hash")
+        );
+
+        let result2 = with_appended_extension(path, "monorepo");
+        assert_eq!(
+            result2,
+            Path::new("/tmp/trusted/infra-mise.toml-a1b2c3d4e5f67890.monorepo")
         );
     }
 }

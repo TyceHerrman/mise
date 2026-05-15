@@ -11,7 +11,7 @@ By default, this keeps the range specified in mise.toml. So if you have node@20 
 upgrade to the latest 20.x.x version available. See the `--bump` flag to use the latest version
 and bump the version in mise.toml.
 
-This will update mise.lock if it is enabled, see <https://mise.jdx.dev/configuration/settings.html#lockfile>
+This will update mise.lock if it is enabled, see <https://mise.en.dev/configuration/settings.html#lockfile>
 
 ## Arguments
 
@@ -67,6 +67,17 @@ Like --dry-run but exits with code 1 if there are outdated tools
 
 This is useful for scripts to check if tools need to be upgraded.
 
+### `--inactive`
+
+Upgrade all tools, including installed-but-inactive tools not present in the current config
+
+### `--local`
+
+Only upgrade tools defined in local config files
+
+This will only upgrade tools that are defined in project-local mise.toml and
+will skip tools defined in the global config (~/.config/mise/config.toml).
+
 ### `--raw`
 
 Directly pipe stdin/stdout/stderr from plugin to user Sets --jobs=1
@@ -97,4 +108,7 @@ $ mise upgrade --exclude go
 
 # Show a multiselect menu to choose which tools to upgrade
 $ mise upgrade --interactive
+
+# Only upgrade tools defined in local mise.toml, not global ones
+$ mise upgrade --local
 ```

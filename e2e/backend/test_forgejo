@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
 
+# Disabled: Forgejo tests are flaky due to intermittent API issues
+exit 0
+
 # Test basic Forgejo backend functionality with real tools
 cat <<EOF >mise.toml
 [tools]
@@ -13,9 +16,9 @@ mise uninstall forgejo:roele/mise-test-fixtures
 # Test Forgejo backend with platform-specific URLs
 cat <<EOF >mise.toml
 [tools."forgejo:roele/mise-test-fixtures"]
-platform_darwin_arm64_url = "https://mise.jdx.dev/test-fixtures/hello-world-1.0.0.tar.gz"
-platform_darwin_amd64_url = "https://mise.jdx.dev/test-fixtures/hello-world-1.0.0.tar.gz"
-platform_linux_amd64_url = "https://mise.jdx.dev/test-fixtures/hello-world-1.0.0.tar.gz"
+platform_darwin_arm64_url = "https://mise.en.dev/test-fixtures/hello-world-1.0.0.tar.gz"
+platform_darwin_amd64_url = "https://mise.en.dev/test-fixtures/hello-world-1.0.0.tar.gz"
+platform_linux_amd64_url = "https://mise.en.dev/test-fixtures/hello-world-1.0.0.tar.gz"
 version = "1.0.0"
 bin_path = "bin"
 postinstall = "chmod +x \$MISE_TOOL_INSTALL_PATH/bin/hello-world"

@@ -1,5 +1,7 @@
-backends = [
-  "github:codefresh-io/cli[exe=codefresh]",
-  "asdf:gurukulkarni/asdf-codefresh",
-]
 description = "The Codefresh CLI provides a full and flexible interface to interact with Codefresh"
+
+[[backends]]
+full = "github:codefresh-io/cli"
+
+[[backends]]
+full = "asdf:gurukulkarni/asdf-codefresh"

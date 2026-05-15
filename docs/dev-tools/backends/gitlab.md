@@ -22,6 +22,96 @@ The version will be set in `~/.config/mise/config.toml` with the following forma
 "gitlab:gitlab-org/gitlab-runner" = { version = "latest", asset_pattern = "gitlab-runner-linux-x64" }
 ```
 
+## Authentication
+
+For private repositories or higher API limits, mise supports several GitLab token sources.
+
+### Token priority
+
+mise checks these sources in order and uses the first token found:
+
+1. `MISE_GITLAB_ENTERPRISE_TOKEN` (for non-`gitlab.com` hosts)
+2. `MISE_GITLAB_TOKEN`
+3. `GITLAB_TOKEN`
+4. `credential_command` (if set)
+5. `gitlab_tokens.toml` (per host)
+6. glab CLI config (`config.yml`, if enabled)
+7. `git credential fill` (if `gitlab.use_git_credentials=true`)
+
+### Environment variables
+
+```sh
+export MISE_GITLAB_TOKEN="glpat-xxxxxxxx"
+```
+
+For self-hosted GitLab instances:
+
+```sh
+export MISE_GITLAB_ENTERPRISE_TOKEN="glpat-yyyyyyyy"
+```
+
+### Token file (`gitlab_tokens.toml`)
+
+```toml
+# ~/.config/mise/gitlab_tokens.toml
+[tokens."gitlab.com"]
+token = "glpat-xxxxxxxx"
+
+[tokens."gitlab.mycompany.com"]
+token = "glpat-yyyyyyyy"
+```
+
+### `credential_command`
+
+You can provide a shell command that prints a token to stdout:
+
+```toml
+[settings.gitlab]
+credential_command = "op read 'op://Private/GitLab Token/credential'"
+```
+
+mise executes this command with the configured default inline shell. The target hostname is available as `MISE_CREDENTIAL_HOST`, and the provider name (`gitlab`) is available as `MISE_CREDENTIAL_PROVIDER`. For compatibility, recognized sh-compatible shells (`ash`, `bash`, `dash`, `ksh`, `sh`, and `zsh`) also receive the hostname as `$1`/`${1}`.
+
+:::: warning Planned deprecation
+The legacy `$1`/`${1}` hostname argument is deprecated. Use `MISE_CREDENTIAL_HOST` instead. mise will start warning in `2026.11.0`, and `$1` compatibility will be removed in `2027.11.0`.
+::::
+
+### glab CLI integration
+
+mise can read tokens from [glab](https://gitlab.com/gitlab-org/cli) config as a fallback. It checks:
+
+1. `$GLAB_CONFIG_DIR/config.yml`
+2. `$XDG_CONFIG_HOME/glab-cli/config.yml` (defaults to `~/.config/glab-cli/config.yml`)
+3. `~/Library/Application Support/glab-cli/config.yml` (macOS)
+
+Disable this fallback with:
+
+```toml
+[settings.gitlab]
+glab_cli_tokens = false
+```
+
+### `git credential fill` fallback
+
+As a last resort, mise can query git credential helpers:
+
+```toml
+[settings.gitlab]
+use_git_credentials = true
+```
+
+This uses `git credential fill` and supports credentials stored by helpers such as macOS Keychain.
+
+### Debugging token resolution
+
+Use `mise token gitlab` to see which token mise would use for a given host:
+
+```sh
+mise token gitlab
+mise token gitlab --unmask
+mise token gitlab gitlab.mycompany.com
+```
+
 ## Tool Options
 
 The following [tool-options](/dev-tools/#tool-options) are available for the `gitlab` backend—these
@@ -189,9 +279,28 @@ rename_exe = "mytool"  # Rename the extracted binary to mytool
 Use `rename_exe` for archives where the binary inside has a different name than desired. Use `bin` for single binary downloads (non-archives).
 :::
 
+### `no_app`
+
+Skip macOS .app bundle assets during autodetection and prefer standalone CLI binaries instead. This is useful when a repository provides both a macOS .app bundle (often an Xcode extension or GUI application) and a standalone command-line tool:
+
+```toml
+[tools."gitlab:myorg/mytool"]
+version = "latest"
+no_app = true
+```
+
+When `no_app = true`:
+
+- Assets containing `.app.` (e.g., `Tool.app.zip`, `Tool.for.Xcode.app.zip`) are penalized during autodetection
+- Standalone archives are preferred
+- This is mainly useful for macOS asset selection; non-macOS `.app.` assets are already penalized by platform matching
+- Only affects autodetection; explicit `asset_pattern` values are used as-is
+
 ### `bin_path`
 
+::: v-pre
 Specify the directory containing binaries within the extracted archive, or where to place the downloaded file. This supports Tera templating with variables like `{{ version }}`, `{{ os }}`, `{{ arch }}`, and arch aliases (`{{ darwin_os }}`, `{{ amd64_arch }}`, `{{ x86_64_arch }}`, `{{ gnu_arch }}`):
+:::
 
 ```toml
 [tools."gitlab:gitlab-org/gitlab-runner"]
@@ -224,7 +333,7 @@ When enabled:
 
 ### `api_url`
 
-For self-hosted GitLab instances, specify the API URL:
+For self-hosted GitLab instances, specify the API URL. mise uses this URL for release listing and release asset lookup, and may also use it to download assets when browser download URLs are not reachable or when using custom/private instances:
 
 ```toml
 [tools]
@@ -257,4 +366,5 @@ export MISE_GITLAB_ENTERPRISE_TOKEN="your-token"
 <script setup>
 import Settings from '/components/settings.vue';
 </script>
+
 <Settings child="gitlab" :level="3" />

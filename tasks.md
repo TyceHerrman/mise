@@ -116,10 +116,6 @@ User to run as
 
 Generate a flamegraph for performance analysis
 
-## `gen-release-notes`
-
-- **Usage**: `gen-release-notes`
-
 ## `install-dev`
 
 - **Usage**: `install-dev`
@@ -141,41 +137,11 @@ Run all lint checks
 
 Automatically fix lint issues
 
-## `lint:actionlint`
-
-- **Usage**: `lint:actionlint`
-
-Lint GitHub Actions workflows
-
-## `lint:cargo-fmt`
-
-- **Usage**: `lint:cargo-fmt`
-
-Check Rust code formatting with cargo fmt
-
 ## `lint:hk`
 
 - **Usage**: `lint:hk`
 
 Lint HK files
-
-## `lint:markdownlint`
-
-- **Usage**: `lint:markdownlint`
-
-Lint Markdown files
-
-## `lint:ripgrep`
-
-- **Usage**: `lint:ripgrep`
-
-Lint using ripgrep
-
-## `lint:schema`
-
-- **Usage**: `lint:schema`
-
-Lint schemas
 
 ## `pre-commit`
 
@@ -278,7 +244,7 @@ run all tests
 
 ## `test-tool-retry`
 
-- **Usage**: `test-tool-retry [--grace-period] <tools>…`
+- **Usage**: `test-tool-retry [--grace-period] [--check-only] <tools>…`
 
 Retry failed test-tools with grace period for recent upstream releases
 
@@ -293,6 +259,10 @@ Failed tools to retry
 #### `--grace-period`
 
 Ignore failures from tools whose upstream released &lt;7 days ago
+
+#### `--check-only`
+
+Skip retrying tools, only check grace period (use with --grace-period)
 
 ## `test:build-perf-workspace`
 

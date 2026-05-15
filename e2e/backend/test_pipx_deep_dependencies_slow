@@ -10,7 +10,7 @@ exit 1
 EOF
 chmod +x "$HOME"/bin/fail
 for TOOL in python python3 pipx; do
-	ln -s fail "$HOME/bin/$TOOL"
+  ln -s fail "$HOME/bin/$TOOL"
 done
 export PATH="$HOME/bin:$PATH"
 
@@ -21,6 +21,7 @@ assert_fail "pipx"
 
 # Use only precompiled python
 export MISE_PYTHON_COMPILE=0
+export MISE_PYTHON_GITHUB_ATTESTATIONS=0
 
 # Set up a 3-step installation: python@3.12.3 > pipx@1.5.0 > pipx:mkdocs@1.6.0
 cat >.mise.toml <<EOF

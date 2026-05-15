@@ -1,8 +1,10 @@
 use crate::dirs;
 use crate::task::Task;
+use crate::tera::{contains_template_syntax, render_str};
 use serde::ser::{SerializeMap, SerializeSeq};
 use serde::{Deserialize, Deserializer, Serialize};
 use std::hash::{DefaultHasher, Hash, Hasher};
+use std::path::Path;
 
 #[derive(Debug, Clone, Eq, PartialEq, strum::EnumIs)]
 pub enum TaskOutputs {
@@ -32,17 +34,42 @@ impl TaskOutputs {
         }
     }
 
-    pub fn paths(&self, task: &Task) -> Vec<String> {
+    pub fn patterns(&self) -> Vec<String> {
         match self {
             TaskOutputs::Files(files) => files.clone(),
-            TaskOutputs::Auto => vec![self.auto_path(task)],
+            TaskOutputs::Auto => vec![],
         }
     }
 
-    fn auto_path(&self, task: &Task) -> String {
+    pub fn paths(&self, task: &Task, root: &Path) -> Vec<String> {
+        match self {
+            TaskOutputs::Files(files) => files.clone(),
+            TaskOutputs::Auto => vec![self.auto_path(task, root)],
+        }
+    }
+
+    pub fn has_tera_template(&self) -> bool {
+        match self {
+            TaskOutputs::Files(files) => files.iter().any(|file| contains_template_syntax(file)),
+            TaskOutputs::Auto => false,
+        }
+    }
+
+    pub fn raw_templates_without_env(&self) -> RawOutputTemplates {
+        match self {
+            TaskOutputs::Files(files) => RawOutputTemplates {
+                templates: Some(files.clone()),
+                original_env: None,
+            },
+            TaskOutputs::Auto => RawOutputTemplates::default(),
+        }
+    }
+
+    fn auto_path(&self, task: &Task, root: &Path) -> String {
         let mut hasher = DefaultHasher::new();
         task.hash(&mut hasher);
         task.config_source.hash(&mut hasher);
+        root.hash(&mut hasher);
         let hash = format!("{:x}", hasher.finish());
         dirs::STATE
             .join("task-auto-outputs")
@@ -63,7 +90,9 @@ impl TaskOutputs {
                     .get("env")
                     .and_then(|v| serde_json::from_value(v.clone()).ok());
                 for file in files.iter_mut() {
-                    *file = tera.render_str(file, ctx)?;
+                    if contains_template_syntax(file) {
+                        *file = render_str(tera, file, ctx)?;
+                    }
                 }
                 Ok(RawOutputTemplates {
                     templates: Some(raw),
@@ -85,19 +114,32 @@ impl TaskOutputs {
         if let TaskOutputs::Files(files) = self
             && let Some(raw_templates) = raw.templates.as_ref()
         {
-            let mut tera = crate::tera::get_tera(Some(config_root));
-            let mut ctx = tera::Context::new();
-            // Start with original env from initial render, then overlay dependency env
-            let mut env_map = raw.original_env.clone().unwrap_or_default();
-            for (k, v) in env {
-                env_map.insert(k.clone(), v.clone());
-            }
-            ctx.insert("env", &env_map);
-            ctx.insert("config_root", &config_root.to_string_lossy().to_string());
-            *files = raw_templates
+            if raw_templates
                 .iter()
-                .map(|tmpl| tera.render_str(tmpl, &ctx))
-                .collect::<Result<Vec<_>, _>>()?;
+                .any(|tmpl| contains_template_syntax(tmpl))
+            {
+                let mut tera = crate::tera::get_tera(Some(config_root));
+                let mut ctx = tera::Context::new();
+                // Start with original env from initial render, then overlay dependency env
+                let mut env_map = raw.original_env.clone().unwrap_or_default();
+                for (k, v) in env {
+                    env_map.insert(k.clone(), v.clone());
+                }
+                ctx.insert("env", &env_map);
+                ctx.insert("config_root", &config_root.to_string_lossy().to_string());
+                *files = raw_templates
+                    .iter()
+                    .map(|tmpl| {
+                        if contains_template_syntax(tmpl) {
+                            render_str(&mut tera, tmpl, &ctx)
+                        } else {
+                            Ok(tmpl.clone())
+                        }
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+            } else {
+                *files = raw_templates.clone();
+            }
         }
         Ok(())
     }

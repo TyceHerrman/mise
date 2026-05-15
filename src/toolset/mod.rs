@@ -1,35 +1,44 @@
-use std::collections::HashMap;
-use std::fmt::{Display, Formatter};
-use std::path::PathBuf;
-use std::sync::Arc;
-
-use serde::Serialize;
-
 use crate::backend::Backend;
 use crate::cli::args::BackendArg;
 use crate::config::Config;
 use crate::config::settings::{Settings, SettingsStatusMissingTools};
 use crate::env::TERM_WIDTH;
+use crate::lockfile::{Lockfile, lockfile_path_for_config};
+use crate::registry::REGISTRY;
 use crate::registry::tool_enabled;
 use crate::{backend, parallel};
-pub use builder::ToolsetBuilder;
+pub use builder::{ConfigScope, ToolsetBuilder};
 use console::truncate_str;
-use eyre::Result;
+use eyre::{Result, bail};
+use helpers::TVTuple;
 use indexmap::IndexMap;
 use itertools::Itertools;
 use outdated_info::OutdatedInfo;
 pub use outdated_info::is_outdated_version;
+use petgraph::Direction;
+use petgraph::graphmap::DiGraphMap;
+use serde::Serialize;
+use std::collections::HashSet;
+use std::fmt::{Display, Formatter};
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::{
+    cmp::Reverse,
+    collections::{BinaryHeap, HashMap},
+};
 use tokio::sync::OnceCell;
 
+pub use install_options::InstallOptions;
 pub use tool_request::ToolRequest;
-pub use tool_request_set::{ToolRequestSet, ToolRequestSetBuilder};
+pub use tool_request_set::{ToolRequestSet, ToolRequestSetBuilder, tool_env_vars};
 pub use tool_source::ToolSource;
 pub use tool_version::{ResolveOptions, ToolVersion};
 pub use tool_version_list::ToolVersionList;
-pub use tool_version_options::{ToolVersionOptions, parse_tool_options};
-
-use helpers::TVTuple;
-pub use install_options::InstallOptions;
+pub use tool_version_options::{
+    CoreToolOptions, EPHEMERAL_OPT_KEYS, RawBackendOptions, ResolvedToolOptions, ToolOptionSource,
+    ToolOptions, ToolVersionOptions, parse_tool_options, serialize_tool_options,
+    try_parse_tool_options,
+};
 
 mod builder;
 pub mod env_cache;
@@ -52,6 +61,13 @@ mod toolset_paths;
 pub struct ToolInfo {
     pub version: String,
     pub path: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(untagged)]
+pub enum ToolInfos {
+    Single(ToolInfo),
+    Multiple(Vec<ToolInfo>),
 }
 
 /// a toolset is a collection of tools for various plugins
@@ -154,7 +170,7 @@ impl Toolset {
         })
     }
 
-    pub async fn list_installed_versions(&self, config: &Arc<Config>) -> Result<Vec<TVTuple>> {
+    pub async fn list_installed_versions(&self, _config: &Arc<Config>) -> Result<Vec<TVTuple>> {
         let current_versions: HashMap<(String, String), TVTuple> = self
             .list_current_versions()
             .into_iter()
@@ -167,10 +183,24 @@ impl Toolset {
                 if let Some((p, tv)) = current_versions.get(&(b.id().into(), v.clone())) {
                     versions.push((p.clone(), tv.clone()));
                 } else {
-                    let tv = ToolRequest::new(b.ba().clone(), &v, ToolSource::Unknown)?
-                        .resolve(config, &Default::default())
-                        .await?;
-                    versions.push((b.clone(), tv));
+                    // The version string came from an on-disk install directory,
+                    // so it's already concrete — don't call `.resolve()`, which
+                    // would hit the network and can fail (e.g. a stale install
+                    // dir literally named `latest` would re-query the registry).
+                    // A single bad install also shouldn't abort the whole listing,
+                    // so warn and skip on per-tool failures.
+                    match ToolRequest::new(b.ba().clone(), &v, ToolSource::Unknown) {
+                        Ok(req) => {
+                            // Use `request.version()`, not the raw dir name `v`:
+                            // for ref-type dirs (e.g. `ref-main`) `ToolRequest::new`
+                            // normalizes to `ref:main`, and `ToolVersion.version`
+                            // must match `tv.request.version()` to stay consistent
+                            // with the old `.resolve()` path.
+                            let version = req.version();
+                            versions.push((b.clone(), ToolVersion::new(req, version)));
+                        }
+                        Err(e) => warn!("Error listing {}@{}: {:#}", b.id(), v, e),
+                    }
                 }
             }
         }
@@ -260,8 +290,18 @@ impl Toolset {
         filter_tools: Option<&[crate::cli::args::ToolArg]>,
         exclude_tools: Option<&[crate::cli::args::ToolArg]>,
     ) -> Vec<OutdatedInfo> {
-        let versions = self
-            .list_current_versions()
+        let list_versions = if opts.inactive {
+            match self.list_all_versions(config).await {
+                Ok(v) => v,
+                Err(err) => {
+                    warn!("Failed to list all versions: {err:#}");
+                    vec![]
+                }
+            }
+        } else {
+            self.list_current_versions()
+        };
+        let versions = list_versions
             .into_iter()
             // Filter to only check specified tools if provided
             .filter(|(_, tv)| {
@@ -281,9 +321,11 @@ impl Toolset {
             .map(|(t, tv)| (config.clone(), t, tv, bump, opts.clone()))
             .collect::<Vec<_>>();
         let outdated = parallel::parallel(versions, |(config, t, tv, bump, opts)| async move {
-            let mut outdated = vec![];
+            let mut outdated = HashSet::new();
             match t.outdated_info(&config, &tv, bump, &opts).await {
-                Ok(Some(oi)) => outdated.push(oi),
+                Ok(Some(oi)) => {
+                    outdated.insert(oi);
+                }
                 Ok(None) => {}
                 Err(e) => {
                     warn!("Error getting outdated info for {tv}: {e:#}");
@@ -295,7 +337,9 @@ impl Toolset {
                 return Ok(outdated);
             }
             match OutdatedInfo::resolve(&config, tv.clone(), bump, &opts).await {
-                Ok(Some(oi)) => outdated.push(oi),
+                Ok(Some(oi)) => {
+                    outdated.insert(oi);
+                }
                 Ok(None) => {}
                 Err(e) => {
                     warn!("Error creating OutdatedInfo for {tv}: {e:#}");
@@ -311,8 +355,8 @@ impl Toolset {
         outdated.into_iter().flatten().collect()
     }
 
-    pub fn build_tools_tera_map(&self, config: &Arc<Config>) -> HashMap<String, ToolInfo> {
-        let mut tools_map: HashMap<String, ToolInfo> = HashMap::new();
+    pub fn build_tools_tera_map(&self, config: &Arc<Config>) -> HashMap<String, ToolInfos> {
+        let mut tools_map: HashMap<String, Vec<ToolInfo>> = HashMap::new();
         for (_, tv) in self.list_current_installed_versions(config) {
             let tool_name = tv.ba().tool_name.clone();
             let short = tv.ba().short.clone();
@@ -320,12 +364,25 @@ impl Toolset {
                 version: tv.version.clone(),
                 path: tv.install_path().to_string_lossy().to_string(),
             };
-            tools_map.entry(tool_name.clone()).or_insert(info.clone());
+            tools_map
+                .entry(tool_name.clone())
+                .or_default()
+                .push(info.clone());
             if short != tool_name {
-                tools_map.entry(short).or_insert(info);
+                tools_map.entry(short).or_default().push(info);
             }
         }
         tools_map
+            .into_iter()
+            .map(|(k, v)| {
+                let infos = if v.len() == 1 {
+                    ToolInfos::Single(v.into_iter().next().unwrap())
+                } else {
+                    ToolInfos::Multiple(v)
+                };
+                (k, infos)
+            })
+            .collect()
     }
 
     pub async fn tera_ctx(&self, config: &Arc<Config>) -> Result<&tera::Context> {
@@ -340,12 +397,119 @@ impl Toolset {
             .await
     }
 
+    /// Sort installed tools so that tools with `overrides` in the registry
+    /// appear before the tools they override. e.g., npm overrides node so that
+    /// the explicitly-installed npm binary is found before node's bundled npm.
+    pub(crate) fn sort_by_overrides(
+        installed: &mut Vec<(Arc<dyn Backend>, ToolVersion)>,
+    ) -> Result<()> {
+        let mut graph = DiGraphMap::<&str, ()>::new();
+
+        // Collect unique IDs to build the graph (deduplicates multi-version tools)
+        let unique_ids: HashSet<String> =
+            installed.iter().map(|(b, _)| b.id().to_string()).collect();
+        let unique_ids: Vec<String> = unique_ids.into_iter().collect();
+
+        let mut original_index: HashMap<&str, usize> = HashMap::new();
+        for (i, (b, _)) in installed.iter().enumerate() {
+            let id = b.id();
+            original_index.entry(id).or_insert(i);
+        }
+
+        for id in &unique_ids {
+            graph.add_node(id.as_str());
+        }
+
+        for id in &unique_ids {
+            let id_str = id.as_str();
+            if let Some(tool) = REGISTRY.get(id_str) {
+                for overridden in tool.overrides {
+                    // Edge: id -> overridden (overrider -> overridden)
+                    // Only add edge if overridden tool is also in the list
+                    if graph.contains_node(overridden) {
+                        graph.add_edge(id_str, overridden, ());
+                    }
+                }
+            }
+        }
+
+        if graph.edge_count() == 0 {
+            return Ok(());
+        }
+
+        // Priority = min(priority, priority_of_dependencies)
+        let mut priorities: HashMap<&str, usize> = original_index.clone();
+        let mut changed = true;
+        while changed {
+            changed = false;
+            for (overrider, overridden, _) in graph.all_edges() {
+                let p_overridden = *priorities.get(overridden).unwrap_or(&usize::MAX);
+                let p_overrider = *priorities.get(overrider).unwrap_or(&usize::MAX);
+                if p_overridden < p_overrider {
+                    priorities.insert(overrider, p_overridden);
+                    changed = true;
+                }
+            }
+        }
+
+        // Topological Sort with Priority Queue
+        let mut in_degree: HashMap<&str, usize> = graph
+            .nodes()
+            .map(|node| {
+                (
+                    node,
+                    graph.neighbors_directed(node, Direction::Incoming).count(),
+                )
+            })
+            .collect();
+
+        let mut pq = BinaryHeap::new();
+        for (&node, &deg) in &in_degree {
+            if deg == 0 {
+                let p = priorities[node];
+                let idx = original_index[node];
+                pq.push(Reverse((p, idx, node)));
+            }
+        }
+
+        let mut sorted_ids: Vec<&str> = Vec::with_capacity(graph.node_count());
+        while let Some(Reverse((_, _, id))) = pq.pop() {
+            sorted_ids.push(id);
+
+            for neighbor in graph.neighbors(id) {
+                if let Some(deg) = in_degree.get_mut(neighbor) {
+                    *deg -= 1;
+                    if *deg == 0 {
+                        let p = priorities[neighbor];
+                        let idx = original_index[neighbor];
+                        pq.push(Reverse((p, idx, neighbor)));
+                    }
+                }
+            }
+        }
+
+        if sorted_ids.len() != graph.node_count() {
+            bail!("Cycle detected in tool overrides");
+        }
+
+        let order: HashMap<&str, usize> = sorted_ids
+            .iter()
+            .enumerate()
+            .map(|(i, &id)| (id, i))
+            .collect();
+        installed.sort_by_cached_key(|(b, _)| order.get(b.id()).copied().unwrap_or(usize::MAX));
+
+        Ok(())
+    }
+
     pub async fn which(
         &self,
         config: &Arc<Config>,
         bin_name: &str,
     ) -> Option<(Arc<dyn Backend>, ToolVersion)> {
-        for (p, tv) in self.list_current_installed_versions(config) {
+        let mut installed = self.list_current_installed_versions(config);
+        Self::sort_by_overrides(&mut installed).unwrap();
+        for (p, tv) in installed {
             match Box::pin(p.which(config, &tv, bin_name)).await {
                 Ok(Some(_bin)) => return Some((p, tv)),
                 Ok(None) => {}
@@ -358,7 +522,9 @@ impl Toolset {
     }
 
     pub async fn which_bin(&self, config: &Arc<Config>, bin_name: &str) -> Option<PathBuf> {
-        for (p, tv) in self.list_current_installed_versions(config) {
+        let mut installed = self.list_current_installed_versions(config);
+        Self::sort_by_overrides(&mut installed).unwrap();
+        for (p, tv) in installed {
             if let Ok(Some(bin)) = Box::pin(p.which(config, &tv, bin_name)).await {
                 return Some(bin);
             }
@@ -421,12 +587,11 @@ impl Toolset {
     }
 
     fn is_disabled(&self, ba: &BackendArg) -> bool {
+        let settings = Settings::get();
+        let enable_tools = settings.enable_tools();
+        let disable_tools = settings.disable_tools();
         !ba.is_os_supported()
-            || !tool_enabled(
-                &Settings::get().enable_tools(),
-                &Settings::get().disable_tools(),
-                &ba.short.to_string(),
-            )
+            || !tool_enabled(enable_tools.as_ref(), &disable_tools, &ba.short.to_string())
     }
 }
 
@@ -462,21 +627,156 @@ impl From<ToolRequestSet> for Toolset {
 /// uninstalling versions that other projects still need.
 pub async fn get_versions_needed_by_tracked_configs(
     config: &Arc<Config>,
+    use_locked_version: bool,
+    offline: bool,
 ) -> Result<std::collections::HashSet<(String, String)>> {
     let mut needed = std::collections::HashSet::new();
-    // Use use_locked_version: false to resolve based on what config files actually
-    // request, not what was previously locked. This is important during upgrade
-    // because the lockfile hasn't been updated yet when this is called.
+    // `mise prune` should keep versions pinned by lockfiles. `mise upgrade`
+    // passes false because it checks what tracked configs resolve to after an
+    // upgrade, before their lockfiles have been updated.
+    // Prune also passes offline=true: it only protects installed versions, so
+    // remote resolution can never affect the outcome and just adds latency.
     let opts = ResolveOptions {
-        use_locked_version: false,
+        use_locked_version,
+        offline,
         ..Default::default()
     };
-    for cf in config.get_tracked_config_files().await?.values() {
+    for (path, cf) in config.get_tracked_config_files().await? {
+        // Prune should protect versions pinned by other tracked projects'
+        // lockfiles. Upgrade passes use_locked_version=false because it must
+        // decide whether old versions are still needed after upgrading.
+        if use_locked_version && Settings::get().lockfile_enabled() {
+            let (lockfile_path, _) = lockfile_path_for_config(&path);
+            match Lockfile::read(&lockfile_path) {
+                Ok(lockfile) => {
+                    for (short, tools) in lockfile.tools() {
+                        for tool in tools {
+                            let version = tool.version.replace([':', '/'], "-");
+                            needed.insert((short.clone(), version.clone()));
+                            if let Some(backend) = &tool.backend {
+                                needed.insert((backend.clone(), version));
+                            }
+                        }
+                    }
+                }
+                Err(err) => warn!(
+                    "error loading tracked lockfile {}: {err:#}",
+                    lockfile_path.display()
+                ),
+            }
+        }
         let mut ts = Toolset::from(cf.to_tool_request_set()?);
         ts.resolve_with_opts(config, &opts).await?;
         for (_, tv) in ts.list_current_versions() {
             needed.insert((tv.ba().short.to_string(), tv.tv_pathname()));
+            // Offline can't resolve `sub-N:latest` to a concrete version
+            // (no remote latest available). Conservatively protect every
+            // installed version of this backend so we don't delete the
+            // active one.
+            if offline
+                && let crate::toolset::ToolRequest::Sub { orig_version, .. } = &tv.request
+                && orig_version == "latest"
+                && let Ok(backend) = tv.backend()
+            {
+                let short = tv.ba().short.to_string();
+                for v in backend.list_installed_versions() {
+                    needed.insert((short.clone(), v));
+                }
+            }
         }
     }
     Ok(needed)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::backend::arg_to_backend;
+    use crate::cli::args::BackendArg;
+    use crate::toolset::{ToolRequest, ToolSource, ToolVersion};
+
+    #[tokio::test]
+    async fn test_sort_by_overrides() {
+        crate::toolset::install_state::init().await.unwrap();
+        let node = arg_to_backend(BackendArg::from("node")).unwrap();
+        let npm = arg_to_backend(BackendArg::from("npm")).unwrap();
+        let jc = arg_to_backend(BackendArg::from("jc")).unwrap();
+        let jq = arg_to_backend(BackendArg::from("jq")).unwrap();
+
+        let mk_tv = |backend: Arc<dyn Backend>, version: &str| {
+            let ba = backend.ba().clone();
+            let req = ToolRequest::System {
+                backend: ba,
+                source: ToolSource::Argument,
+                options: Default::default(),
+            };
+            ToolVersion::new(req, version.into())
+        };
+
+        let tv_node = mk_tv(node.clone(), "20.0.0");
+        let tv_npm = mk_tv(npm.clone(), "10.2.5");
+        let tv_jc = mk_tv(jc.clone(), "1.0.0");
+        let tv_jq = mk_tv(jq.clone(), "1.0.0");
+
+        let mut input = vec![
+            (node.clone(), tv_node.clone()),
+            (jc.clone(), tv_jc.clone()),
+            (jq.clone(), tv_jq.clone()),
+            (npm.clone(), tv_npm.clone()),
+        ];
+        Toolset::sort_by_overrides(&mut input).unwrap();
+        let ids: Vec<&str> = input.iter().map(|(b, _)| b.id()).collect();
+        assert_eq!(ids, vec!["npm", "node", "jc", "jq"]);
+
+        let mut input = vec![
+            (node.clone(), tv_node.clone()),
+            (jq.clone(), tv_jq.clone()),
+            (npm.clone(), tv_npm.clone()),
+            (jc.clone(), tv_jc.clone()),
+        ];
+        Toolset::sort_by_overrides(&mut input).unwrap();
+        let ids: Vec<&str> = input.iter().map(|(b, _)| b.id()).collect();
+        assert_eq!(ids, vec!["npm", "node", "jq", "jc"]);
+
+        let mut input = vec![
+            (jc.clone(), tv_jc.clone()),
+            (npm.clone(), tv_npm.clone()),
+            (jq.clone(), tv_jq.clone()),
+            (node.clone(), tv_node.clone()),
+        ];
+        Toolset::sort_by_overrides(&mut input).unwrap();
+        let ids: Vec<&str> = input.iter().map(|(b, _)| b.id()).collect();
+        assert_eq!(ids, vec!["jc", "npm", "jq", "node"]);
+
+        // Test with multiple versions of the same tool
+        let tv_node_18 = mk_tv(node.clone(), "18.0.0");
+        let tv_node_20 = mk_tv(node.clone(), "20.0.0");
+        let tv_npm_9 = mk_tv(npm.clone(), "9.0.0");
+
+        let mut input = vec![
+            (node.clone(), tv_node_20.clone()),
+            (node.clone(), tv_node_18.clone()),
+            (jc.clone(), tv_jc.clone()),
+            (npm.clone(), tv_npm_9.clone()),
+            (npm.clone(), tv_npm.clone()),
+        ];
+        Toolset::sort_by_overrides(&mut input).unwrap();
+
+        // npm should come before node (due to override)
+        // Multiple versions of same tool should maintain original order
+        let result: Vec<(&str, &str)> = input
+            .iter()
+            .map(|(b, tv)| (b.id(), tv.version.as_str()))
+            .collect();
+        assert_eq!(
+            result,
+            vec![
+                ("npm", "9.0.0"),
+                ("npm", "10.2.5"),
+                ("node", "20.0.0"),
+                ("node", "18.0.0"),
+                ("jc", "1.0.0"),
+            ]
+        );
+    }
 }

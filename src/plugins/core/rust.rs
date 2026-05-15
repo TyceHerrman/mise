@@ -41,13 +41,16 @@ impl RustPlugin {
         file::make_executable(rustup_path())?;
         file::create_dir_all(rustup_home())?;
         let ts = ctx.config.get_toolset().await?;
-        let cmd = CmdLineRunner::new(rustup_path())
+        let mut cmd = CmdLineRunner::new(rustup_path())
             .with_pr(ctx.pr.as_ref())
             .arg("--no-modify-path")
             .arg("--default-toolchain")
             .arg("none")
             .arg("-y")
             .envs(self.exec_env(&ctx.config, ts, tv).await?);
+        if let Some(host) = settings.rust.default_host.as_ref() {
+            cmd = cmd.arg("--default-host").arg(host);
+        }
         cmd.execute()?;
         Ok(())
     }
@@ -113,13 +116,16 @@ impl Backend for RustPlugin {
         Ok(versions)
     }
 
-    async fn idiomatic_filenames(&self) -> Result<Vec<String>> {
+    async fn _idiomatic_filenames(&self) -> Result<Vec<String>> {
         Ok(vec!["rust-toolchain.toml".into()])
     }
 
-    async fn parse_idiomatic_file(&self, path: &Path) -> Result<String> {
+    async fn _parse_idiomatic_file(&self, path: &Path) -> Result<Vec<String>> {
         let rt = parse_idiomatic_file(path)?;
-        Ok(rt.channel)
+        if rt.channel.is_empty() {
+            return Ok(vec![]);
+        }
+        Ok(vec![rt.channel])
     }
 
     async fn install_version_(&self, ctx: &InstallContext, tv: ToolVersion) -> Result<ToolVersion> {
@@ -128,18 +134,19 @@ impl Backend for RustPlugin {
 
         let (profile, components, targets) = get_args(&tv);
 
-        CmdLineRunner::new(RUSTUP_BIN)
+        let mut cmd = CmdLineRunner::new(RUSTUP_BIN)
             .with_pr(ctx.pr.as_ref())
             .arg("toolchain")
             .arg("install")
             .arg(&tv.version)
-            .opt_arg(profile.as_ref().map(|_| "--profile"))
-            .opt_arg(profile)
             .opt_args("--component", components)
             .opt_args("--target", targets)
             .prepend_path(self.list_bin_paths(&ctx.config, &tv).await?)?
-            .envs(self.exec_env(&ctx.config, ts, &tv).await?)
-            .execute()?;
+            .envs(self.exec_env(&ctx.config, ts, &tv).await?);
+        if let Some(profile) = profile.as_ref() {
+            cmd = cmd.arg("--profile").arg(profile);
+        }
+        cmd.execute()?;
 
         file::remove_all(tv.install_path())?;
         file::make_symlink(&cargo_home().join("bin"), &tv.install_path())?;
@@ -215,7 +222,19 @@ impl Backend for RustPlugin {
             for (k, v) in self.exec_env(config, ts, tv).await? {
                 cmd = cmd.env(k, v);
             }
-            let out = cmd.read()?;
+            // rustup check returns exit code 100 when updates are available
+            // This is not an error, so we use unchecked() and check status manually
+            let result = cmd.stdout_capture().stderr_capture().unchecked().run()?;
+            let exit_code = result.status.code().unwrap_or(-1);
+            if exit_code != 0 && exit_code != 100 {
+                let stderr = String::from_utf8_lossy(&result.stderr);
+                eyre::bail!(
+                    "command [\"rustup\", \"check\"] exited with code {}. stderr: {}",
+                    exit_code,
+                    stderr.trim()
+                );
+            }
+            let out = String::from_utf8_lossy(&result.stdout);
             for line in out.lines() {
                 if line.starts_with(&self.target_triple(tv))
                     && let Some(_cap) = v_re.captures(line)
@@ -258,7 +277,7 @@ fn get_args(tv: &ToolVersion) -> (Option<String>, Option<Vec<String>>, Option<Ve
     let profile = rt
         .as_ref()
         .and_then(|rt| rt.profile.clone())
-        .or_else(|| tv.request.options().get("profile").cloned());
+        .or_else(|| tv.request.options().get("profile").map(|s| s.to_string()));
     let components = rt
         .as_ref()
         .and_then(|rt| rt.components.clone())
@@ -352,21 +371,35 @@ fn rustup_path() -> PathBuf {
 }
 
 fn rustup_home() -> PathBuf {
-    Settings::get()
+    let path = Settings::get()
         .rust
         .rustup_home
         .clone()
         .or(env::var_path("RUSTUP_HOME"))
-        .unwrap_or(dirs::HOME.join(".rustup"))
+        .unwrap_or(dirs::HOME.join(".rustup"));
+    if path.is_relative() {
+        std::env::current_dir()
+            .map(|cwd| cwd.join(&path))
+            .unwrap_or(path)
+    } else {
+        path
+    }
 }
 
 fn cargo_home() -> PathBuf {
-    Settings::get()
+    let path = Settings::get()
         .rust
         .cargo_home
         .clone()
         .or(env::var_path("CARGO_HOME"))
-        .unwrap_or(dirs::HOME.join(".cargo"))
+        .unwrap_or(dirs::HOME.join(".cargo"));
+    if path.is_relative() {
+        std::env::current_dir()
+            .map(|cwd| cwd.join(&path))
+            .unwrap_or(path)
+    } else {
+        path
+    }
 }
 
 fn cargo_bin() -> PathBuf {

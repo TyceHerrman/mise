@@ -56,7 +56,7 @@ impl VersionProvider for MiseVersionProvider {
         let config = Config::get().await.ok()?;
 
         // Get the latest version
-        backend.latest_version(&config, None).await.ok()?
+        backend.latest_version(&config, None, None).await.ok()?
     }
 }
 
@@ -215,13 +215,13 @@ impl Edit {
             editor.add_tool(&tool.name, &version);
         }
 
-        // Auto-detect prepare providers if experimental is enabled
+        // Auto-detect deps providers if experimental is enabled
         if Settings::get().experimental {
-            pr.set_message("Detecting prepare providers...".into());
+            pr.set_message("Detecting deps providers...".into());
             let cwd = env::current_dir().unwrap_or_default();
-            let prepare_providers = crate::prepare::detect_applicable_providers(&cwd);
-            for provider in prepare_providers {
-                editor.add_prepare(&provider);
+            let deps_providers = crate::deps::detect_applicable_providers(&cwd);
+            for provider in deps_providers {
+                editor.add_deps(&provider);
             }
         }
 
@@ -305,21 +305,19 @@ fn detect_tools() -> Vec<DetectedTool> {
 
         for detect_file in tool.detect.iter() {
             let path = cwd.join(detect_file);
-            if path.exists() && !seen_tools.contains(*name) {
+            if path.exists() && !seen_tools.contains(name) {
                 let version = extract_version(name, &path);
                 detected.push(DetectedTool {
                     name: name.to_string(),
                     version,
                     source: detect_file.to_string(),
                 });
-                seen_tools.insert(*name);
+                seen_tools.insert(name);
                 break; // Only detect once per tool
             }
         }
     }
 
-    // Sort by tool name for consistent output
-    detected.sort_by(|a, b| a.name.cmp(&b.name));
     detected
 }
 

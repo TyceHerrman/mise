@@ -5,8 +5,8 @@ to use for new tools since they don't require plugins, they work on windows, the
 features in addition to checksums. aqua installs also show more progress bars, which is nice.
 
 You do not need to separately install aqua. The aqua CLI is not used in mise at all. What is used is
-the [aqua registry](https://github.com/aquaproj/aqua-registry) which is a bunch of yaml files that get compiled into the mise binary on release.
-Here's an example of one of these files: [`aqua:hashicorp/terraform`](https://github.com/aquaproj/aqua-registry/blob/main/pkgs/hashicorp/terraform/registry.yaml).
+the [aqua registry](https://github.com/aquaproj/aqua-registry) that gets compiled into the mise binary on release.
+Here's an example package entry: [`aqua:hashicorp/terraform`](https://github.com/aquaproj/aqua-registry/blob/main/pkgs/hashicorp/terraform/registry.yaml).
 mise has a reimplementation of aqua that knows how to work with these files to install tools.
 
 As of this writing, aqua is relatively new to mise and because a lot of tools are being converted from
@@ -46,11 +46,11 @@ to use the aqua backend. To see these tools, run `mise registry | grep aqua:`.
 
 ### `symlink_bins`
 
-Some tools bundle dependencies that you may not want exposed on PATH. For example, `aws-cli` bundles
+Some tools bundle extra executables that you may not want exposed on PATH. For example, `aws-cli` bundles
 Python, which can conflict with your intended Python version.
 
-Setting `symlink_bins = true` creates a filtered bin directory containing symlinks only to the binaries
-explicitly defined in the aqua registry, preventing bundled dependencies from being exposed.
+Setting `symlink_bins = true` creates a filtered `.mise-bins` directory and exposes only the binaries mise
+intends to expose for that Aqua package, instead of every discovered executable from the install.
 
 ```toml
 [tools]
@@ -59,9 +59,35 @@ aws-cli = { version = "latest", symlink_bins = true }
 
 When enabled:
 
-- Only binaries defined in the aqua registry's `files` field are exposed (e.g., `aws` and `aws_completer` for aws-cli)
-- A `.mise-bins` subdirectory is created with symlinks to these specific binaries
-- Bundled dependencies like Python are not added to PATH
+- If the aqua registry defines a `files` field, only those binaries are exposed (e.g., `aws` and `aws_completer` for aws-cli)
+- Otherwise, mise falls back to exposing the inferred primary binary for the package
+- A `.mise-bins` subdirectory is created with symlinks to the exposed binaries
+- Bundled dependencies and other extra executables, such as Python in `aws-cli`, are not added to PATH
+
+### `vars`
+
+Some aqua registry entries define template variables (for example <span v-pre>`{{.Vars.channel}}`</span>).
+Set them via tool options using either top-level keys or a nested `vars` table:
+
+```toml
+[tools]
+"aqua:flutter/flutter" = { version = "3.32.8", channel = "stable" }
+"aqua:scenarigo/scenarigo" = { version = "0.21.0", vars = { go_version = "1.24" } }
+```
+
+Vars with defaults are filled automatically. Vars marked as required in the aqua registry must be set
+unless the registry also provides a default.
+
+### `prerelease`
+
+By default, releases flagged `prerelease: true` on GitHub are excluded from `mise ls-remote` and from `latest` resolution. Set `prerelease = true` to include them:
+
+```toml
+[tools]
+"aqua:owner/tool" = { version = "latest", prerelease = true }
+```
+
+When set, pre-release tags (e.g. `v1.0.0-rc1`, `v0.1.2-dev.86`) appear in `mise ls-remote`, `latest` resolves against the full list including pre-releases, and fuzzy version queries match pre-release tags. Has no effect when a package uses the `github_tag` version source (git tags don't carry a prerelease flag). Draft releases are always excluded. See the [github backend docs](/dev-tools/backends/github.html#prerelease) for more detail.
 
 ## Settings
 
@@ -86,7 +112,7 @@ GitHub Artifact Attestations provide cryptographic proof that artifacts were bui
 **Configuration:**
 
 ```bash
-# Enable/disable GitHub attestations verification (default: true)
+# Enable/disable GitHub artifact attestations verification (default: true)
 export MISE_AQUA_GITHUB_ATTESTATIONS=true
 ```
 
@@ -146,7 +172,7 @@ During tool installation, mise will:
 
 ```
 ✓ Downloaded cli/cli v2.50.0
-✓ GitHub attestations verified
+✓ GitHub artifact attestations verified
 ✓ Tool installed successfully
 ```
 

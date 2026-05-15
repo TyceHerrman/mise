@@ -1,6 +1,6 @@
 {
-  "$schema": "http://json-schema.org/draft-07/schema#",
-  "$id": "https://mise.jdx.dev/schema/mise-settings.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mise.en.dev/schema/mise-settings.json",
   "title": "Mise Settings Schema",
   "description": "JSON schema for mise settings.toml configuration file",
   "type": "object",
@@ -8,22 +8,22 @@
     "^[a-zA-Z0-9_]+$": {
       "oneOf": [
         {
-          "$ref": "#/definitions/setting"
+          "$ref": "#/$defs/setting"
         },
         {
           "type": "object",
           "patternProperties": {
             "^[a-zA-Z0-9_]+$": {
-              "$ref": "#/definitions/setting"
+              "$ref": "#/$defs/setting"
             }
           },
-          "additionalProperties": false
+          "unevaluatedProperties": false
         }
       ]
     }
   },
-  "additionalProperties": false,
-  "definitions": {
+  "unevaluatedProperties": false,
+  "$defs": {
     "setting": {
       "type": "object",
       "properties": {
@@ -44,6 +44,14 @@
         "deprecated": {
           "type": "string",
           "description": "Deprecation message if this setting is deprecated"
+        },
+        "deprecated_warn_at": {
+          "type": "string",
+          "description": "Mise version at which the deprecation warning starts showing (e.g. \"2026.8.0\")"
+        },
+        "deprecated_remove_at": {
+          "type": "string",
+          "description": "Mise version at which the deprecated code should be removed (triggers debug_assert, e.g. \"2027.2.0\")"
         },
         "description": {
           "type": "string",
@@ -76,9 +84,15 @@
                 "properties": {
                   "value": {
                     "oneOf": [
-                      { "type": "string" },
-                      { "type": "boolean" },
-                      { "type": "integer" }
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "boolean"
+                      },
+                      {
+                        "type": "integer"
+                      }
                     ],
                     "description": "The enum value"
                   },
@@ -88,7 +102,7 @@
                   }
                 },
                 "required": ["value"],
-                "additionalProperties": false
+                "unevaluatedProperties": false
               }
             ]
           }
@@ -111,6 +125,7 @@
             "bool_string",
             "list_by_comma",
             "list_by_colon",
+            "list_by_os_path_separator",
             "set_by_comma",
             "parse_url_replacements"
           ],
@@ -143,7 +158,7 @@
         }
       },
       "required": ["description"],
-      "additionalProperties": false
+      "unevaluatedProperties": false
     }
   }
 }

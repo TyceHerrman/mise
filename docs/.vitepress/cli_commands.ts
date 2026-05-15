@@ -62,6 +62,20 @@ export const commands: { [key: string]: Command } = {
   deactivate: {
     hide: false,
   },
+  deps: {
+    hide: false,
+    subcommands: {
+      add: {
+        hide: false,
+      },
+      install: {
+        hide: false,
+      },
+      remove: {
+        hide: false,
+      },
+    },
+  },
   direnv: {
     hide: true,
     subcommands: {
@@ -128,6 +142,14 @@ export const commands: { [key: string]: Command } = {
       },
     },
   },
+  github: {
+    hide: true,
+    subcommands: {
+      token: {
+        hide: true,
+      },
+    },
+  },
   global: {
     hide: true,
   },
@@ -167,7 +189,24 @@ export const commands: { [key: string]: Command } = {
   mcp: {
     hide: false,
   },
+  oci: {
+    hide: false,
+    subcommands: {
+      build: {
+        hide: false,
+      },
+      push: {
+        hide: false,
+      },
+      run: {
+        hide: false,
+      },
+    },
+  },
   outdated: {
+    hide: false,
+  },
+  patrons: {
     hide: false,
   },
   plugins: {
@@ -192,9 +231,6 @@ export const commands: { [key: string]: Command } = {
         hide: false,
       },
     },
-  },
-  prepare: {
-    hide: false,
   },
   prune: {
     hide: false,
@@ -303,6 +339,20 @@ export const commands: { [key: string]: Command } = {
   "test-tool": {
     hide: false,
   },
+  token: {
+    hide: false,
+    subcommands: {
+      forgejo: {
+        hide: false,
+      },
+      github: {
+        hide: false,
+      },
+      gitlab: {
+        hide: false,
+      },
+    },
+  },
   tool: {
     hide: false,
   },
@@ -333,6 +383,9 @@ export const commands: { [key: string]: Command } = {
     hide: false,
   },
   unset: {
+    hide: false,
+  },
+  untrust: {
     hide: false,
   },
   unuse: {

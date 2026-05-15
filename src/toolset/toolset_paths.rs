@@ -7,13 +7,12 @@ use std::sync::LazyLock as Lazy;
 
 use crate::config::Config;
 use crate::config::env_directive::EnvResults;
-use crate::registry::REGISTRY;
 use crate::toolset::Toolset;
 use crate::uv;
 use itertools::Itertools;
 
 // Cache Toolset::list_paths results across identical toolsets within a process.
-// Keyed by project_root plus sorted list of backend@version pairs currently installed.
+// Keyed by project_root plus sorted list of backend@requested=version pairs currently installed.
 pub(super) static LIST_PATHS_CACHE: Lazy<DashMap<String, Vec<PathBuf>>> = Lazy::new(DashMap::new);
 
 impl Toolset {
@@ -27,7 +26,7 @@ impl Toolset {
 
         let installed_strs: Vec<String> = installed
             .iter()
-            .map(|(p, tv)| format!("{}@{}", p.id(), tv.version))
+            .map(|(p, tv)| format!("{}@{}={}", p.id(), tv.request.version(), tv.version))
             .sorted()
             .collect();
         key_parts.extend(installed_strs);
@@ -38,22 +37,7 @@ impl Toolset {
             return entry.clone();
         }
 
-        installed.sort_by(|(a, _), (b, _)| {
-            let id_a = a.id();
-            let id_b = b.id();
-
-            if let Some(tool_a) = REGISTRY.get(id_a)
-                && tool_a.overrides.contains(&id_b)
-            {
-                return std::cmp::Ordering::Less;
-            }
-            if let Some(tool_b) = REGISTRY.get(id_b)
-                && tool_b.overrides.contains(&id_a)
-            {
-                return std::cmp::Ordering::Greater;
-            }
-            std::cmp::Ordering::Equal
-        });
+        Self::sort_by_overrides(&mut installed).unwrap();
 
         let mut paths: Vec<PathBuf> = Vec::new();
         for (p, tv) in installed {

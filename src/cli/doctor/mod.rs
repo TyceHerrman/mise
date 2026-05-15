@@ -1,6 +1,7 @@
 mod path;
 
 use crate::{exit, plugins::PluginEnum};
+use std::collections::HashSet;
 use std::{collections::BTreeMap, sync::Arc};
 
 use crate::backend::backend_type::BackendType;
@@ -8,7 +9,7 @@ use crate::build_time::built_info;
 use crate::cli::self_update::SelfUpdate;
 use crate::cli::version;
 use crate::cli::version::VERSION;
-use crate::config::{Config, IGNORED_CONFIG_FILES};
+use crate::config::{Config, IGNORED_CONFIG_FILES, Settings};
 use crate::env::PATH_KEY;
 use crate::file::display_path;
 use crate::git::Git;
@@ -72,7 +73,9 @@ impl Doctor {
             "self_update_available".into(),
             SelfUpdate::is_available().into(),
         );
-        if env::is_activated() && shims_on_path() {
+        // Warn about shims+activate conflict, but not when not_found_auto_install is enabled
+        // since that intentionally preserves shims for auto-install functionality
+        if env::is_activated() && shims_on_path() && !Settings::get().not_found_auto_install {
             self.errors.push("shims are on PATH and mise is also activated. You should only use one of these methods.".to_string());
         }
         data.insert(
@@ -101,6 +104,16 @@ impl Doctor {
                 .collect(),
         );
         let mut aqua = serde_json::Map::new();
+        let aqua_registry_metadata =
+            crate::aqua::standard_registry::AQUA_STANDARD_REGISTRY_METADATA;
+        aqua.insert(
+            "baked_in_registry_repository".into(),
+            aqua_registry_metadata.repository.into(),
+        );
+        aqua.insert(
+            "baked_in_registry_tag".into(),
+            aqua_registry_metadata.tag.into(),
+        );
         aqua.insert(
             "baked_in_registry_tools".into(),
             aqua_registry_count().into(),
@@ -117,6 +130,7 @@ impl Doctor {
         self.analyze_shims(&config, ts).await;
         self.analyze_plugins();
         self.analyze_backend_mismatches();
+        self.check_path_ordering(ts, &config).await;
         data.insert(
             "paths".into(),
             self.paths(ts)
@@ -131,6 +145,16 @@ impl Doctor {
                 .config_files
                 .keys()
                 .map(|p| p.to_string_lossy().to_string())
+                .collect(),
+        );
+        data.insert(
+            "env_files".into(),
+            config
+                .env_results()
+                .await?
+                .env_files
+                .iter()
+                .map(|f| f.to_string_lossy().to_string())
                 .collect(),
         );
         data.insert(
@@ -196,7 +220,9 @@ impl Doctor {
         {
             info::section("self_update_instructions", instructions)?;
         }
-        if env::is_activated() && shims_on_path() {
+        // Warn about shims+activate conflict, but not when not_found_auto_install is enabled
+        // since that intentionally preserves shims for auto-install functionality
+        if env::is_activated() && shims_on_path() && !Settings::get().not_found_auto_install {
             self.errors.push("shims are on PATH and mise is also activated. You should only use one of these methods.".to_string());
         }
 
@@ -281,6 +307,7 @@ impl Doctor {
     }
     async fn analyze_config(&mut self, config: &Arc<Config>) -> eyre::Result<()> {
         info::section("config_files", render_config_files(config))?;
+        info::section("env_files", render_env_files(config).await?)?;
         if IGNORED_CONFIG_FILES.is_empty() {
             println!();
             info::inline_section("ignored_config_files", "(none)")?;
@@ -312,7 +339,7 @@ impl Doctor {
                 ));
             } else {
                 let cmd = style::nyellow("mise help activate");
-                let url = style::nunderline("https://mise.jdx.dev");
+                let url = style::nunderline("https://mise.en.dev");
                 self.errors.push(formatdoc!(
                     r#"mise is not activated, run {cmd} or
                         read documentation at {url} for activation instructions.
@@ -327,6 +354,7 @@ impl Doctor {
                 self.analyze_shims(config, &ts).await;
                 self.analyze_toolset(&ts).await?;
                 self.analyze_paths(&ts).await?;
+                self.check_path_ordering(&ts, config).await;
             }
             Err(err) => self.errors.push(format!("failed to load toolset: {err}")),
         }
@@ -367,7 +395,7 @@ impl Doctor {
     }
 
     async fn analyze_shims(&mut self, config: &Arc<Config>, toolset: &Toolset) {
-        let mise_bin = file::which("mise").unwrap_or(env::MISE_BIN.clone());
+        let mise_bin = file::which_no_shims("mise").unwrap_or(env::MISE_BIN.clone());
 
         if let Ok((missing, extra)) = shims::get_shim_diffs(config, mise_bin, toolset).await {
             let cmd = style::nyellow("mise reshim");
@@ -470,10 +498,84 @@ impl Doctor {
         info::section("path", paths)?;
         Ok(())
     }
+
+    /// Check that mise tool paths appear before system paths in the current PATH.
+    /// This detects cases where shell configuration (e.g. brew, system profile) has
+    /// inserted entries before mise's paths, causing system tools to shadow mise-managed ones.
+    async fn check_path_ordering(&mut self, ts: &Toolset, config: &Arc<Config>) {
+        if !env::is_activated() {
+            return;
+        }
+
+        // Get all mise-managed paths (tool installs, env._.path, UV venv, MISE_ADD_PATH, etc.)
+        let mise_paths = match ts.final_env(config).await {
+            Ok((_env, env_results)) => match ts.list_final_paths(config, env_results).await {
+                Ok(paths) => paths,
+                Err(_) => return,
+            },
+            Err(_) => return,
+        };
+        if mise_paths.is_empty() {
+            return;
+        }
+
+        let current_path = &*env::PATH_NON_PRISTINE;
+        if current_path.is_empty() {
+            return;
+        }
+
+        let resolve = |p: &PathBuf| p.canonicalize().unwrap_or_else(|_| p.clone());
+
+        // Resolve all mise-managed paths for comparison
+        let mise_paths_resolved: HashSet<PathBuf> = mise_paths.iter().map(resolve).collect();
+
+        // Also exclude the mise binary's own directory
+        let mise_bin_parent = env::MISE_BIN.parent().and_then(|p| p.canonicalize().ok());
+
+        // Find the index of the first mise-managed path in the current PATH
+        // Note: mise_bin_parent is intentionally excluded here — it's a directory like
+        // /opt/homebrew/bin that happens to contain the mise binary, not a mise tool path.
+        // Including it would mask the exact PATH ordering issue we're trying to detect.
+        let first_mise_idx = current_path
+            .iter()
+            .position(|p| mise_paths_resolved.contains(&resolve(p)));
+
+        let Some(first_mise_idx) = first_mise_idx else {
+            // No mise paths found in current PATH at all — this is already
+            // covered by the activation check
+            return;
+        };
+
+        if first_mise_idx == 0 {
+            return;
+        }
+
+        // Everything before first_mise_idx is by definition not a mise-managed path.
+        // Filter out the mise binary's own directory (e.g. /opt/homebrew/bin) since
+        // that's not a problematic entry — it's just where mise itself is installed.
+        let paths_display = current_path[..first_mise_idx]
+            .iter()
+            .filter(|p| mise_bin_parent.as_ref().is_none_or(|bp| bp != &resolve(p)))
+            .map(display_path)
+            .join("\n  ");
+
+        if paths_display.is_empty() {
+            return;
+        }
+        self.warnings.push(formatdoc!(
+            r#"mise tool paths are not first in PATH. These paths take precedence:
+              {paths_display}
+            This may cause system-installed tools to be used instead of mise-managed versions.
+            Ensure `mise activate` runs after other PATH modifications in your shell rc file."#
+        ));
+    }
 }
 
 fn shims_on_path() -> bool {
-    env::PATH.contains(&dirs::SHIMS.to_path_buf())
+    let shims = &*dirs::SHIMS;
+    env::PATH
+        .iter()
+        .any(|p| crate::file::paths_eq(&crate::file::replace_path(p), shims))
 }
 
 fn yn(b: bool) -> String {
@@ -526,12 +628,20 @@ fn render_config_files(config: &Config) -> String {
         .join("\n")
 }
 
-fn render_backends() -> String {
-    let mut s = vec![];
-    for b in BackendType::iter().filter(|b| b != &BackendType::Unknown) {
-        s.push(format!("{b}"));
+async fn render_env_files(config: &Arc<Config>) -> eyre::Result<String> {
+    let env_files = &config.env_results().await?.env_files;
+    if env_files.is_empty() {
+        Ok("(none)".to_string())
+    } else {
+        Ok(env_files.iter().map(display_path).join("\n"))
     }
-    s.join("\n")
+}
+
+fn render_backends() -> String {
+    BackendType::iter()
+        .filter(|b| b != &BackendType::Unknown)
+        .map(|b| b.to_string())
+        .join("\n")
 }
 
 fn render_plugins() -> String {
@@ -602,11 +712,17 @@ fn shell() -> String {
 }
 
 fn aqua_registry_count() -> usize {
-    aqua_registry::AQUA_STANDARD_REGISTRY_FILES.len()
+    crate::aqua::standard_registry::AQUA_STANDARD_REGISTRY_FILES.len()
 }
 
 fn aqua_registry_count_str() -> String {
-    format!("baked in registry tools: {}", aqua_registry_count())
+    let metadata = crate::aqua::standard_registry::AQUA_STANDARD_REGISTRY_METADATA;
+    format!(
+        "baked in registry: {}@{}\nbaked in registry tools: {}",
+        metadata.repository,
+        metadata.tag,
+        aqua_registry_count()
+    )
 }
 
 static AFTER_LONG_HELP: &str = color_print::cstr!(

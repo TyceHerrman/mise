@@ -9,6 +9,7 @@
 ---@class Runtime
 ---@field osType string Operating system type (e.g. "linux", "darwin", "windows")
 ---@field archType string Architecture type (e.g. "amd64", "arm64")
+---@field envType string|nil libc environment type ("gnu" on glibc Linux, "musl" on musl Linux, nil on other platforms)
 ---@field version string Runtime version
 ---@field pluginDirPath string Path to the plugin directory
 RUNTIME = {}
@@ -94,6 +95,7 @@ ARCH_TYPE = ""
 ---@field env? EnvKey[] Environment variables to set
 ---@field cacheable? boolean Whether the result can be cached (default false)
 ---@field watch_files? string[] Files to watch for cache invalidation
+---@field redact? boolean Whether env vars should be redacted in output (default false)
 
 ---@class MisePathCtx
 ---@field options table Plugin options from mise.toml
@@ -164,11 +166,22 @@ local json = {}
 
 -- file module --------------------------------------------------------
 
+---@class FileStat
+---@field size integer File size in bytes
+---@field is_file boolean Whether this is a regular file
+---@field is_dir boolean Whether this is a directory
+---@field is_symlink boolean Whether this is a symlink
+---@field modified integer|nil Last modification time (Unix seconds since epoch, nil if unavailable)
+---@field accessed integer|nil Last access time (Unix seconds since epoch, nil if unavailable)
+---@field created integer|nil Creation time (Unix seconds since epoch, nil if unavailable)
+---@field mode string|nil Octal permission mode string (Unix only, e.g. "755", nil on Windows)
+
 ---@class file
 ---@field read fun(path: string): string Read file contents
 ---@field exists fun(path: string): boolean Check if a file exists
 ---@field symlink fun(src: string, dst: string) Create a symbolic link
 ---@field join_path fun(...: string): string Join path components
+---@field stat fun(path: string): FileStat|nil Get file metadata or nil if not found
 local file = {}
 
 -- cmd module ---------------------------------------------------------

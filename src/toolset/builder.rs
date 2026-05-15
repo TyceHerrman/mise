@@ -10,10 +10,21 @@ use crate::errors::Error;
 use crate::toolset::{ResolveOptions, ToolRequest, ToolSource, Toolset};
 use crate::{config, env};
 
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum ConfigScope {
+    /// Include tools from all config files
+    #[default]
+    All,
+    /// Only include tools from local (non-global) config files
+    LocalOnly,
+    /// Only include tools from the global config file
+    GlobalOnly,
+}
+
 #[derive(Debug, Default)]
 pub struct ToolsetBuilder {
     args: Vec<ToolArg>,
-    global_only: bool,
+    scope: ConfigScope,
     default_to_latest: bool,
     resolve_options: ResolveOptions,
     config_files: Option<ConfigMap>,
@@ -34,8 +45,8 @@ impl ToolsetBuilder {
         self
     }
 
-    pub fn with_global_only(mut self, global_only: bool) -> Self {
-        self.global_only = global_only;
+    pub fn with_scope(mut self, scope: ConfigScope) -> Self {
+        self.scope = scope;
         self
     }
 
@@ -83,8 +94,11 @@ impl ToolsetBuilder {
         let config_files = self.config_files.as_ref().unwrap_or(&config.config_files);
 
         for cf in config_files.values().rev() {
-            if self.global_only && !config::is_global_config(cf.get_path()) {
-                continue;
+            let is_global = config::is_global_config(cf.get_path());
+            match self.scope {
+                ConfigScope::GlobalOnly if !is_global => continue,
+                ConfigScope::LocalOnly if is_global => continue,
+                _ => {}
             }
             ts.merge(cf.to_toolset()?);
         }
@@ -92,14 +106,18 @@ impl ToolsetBuilder {
     }
 
     fn load_runtime_env(&self, ts: &mut Toolset, env: EnvMap) -> eyre::Result<()> {
+        if self.scope == ConfigScope::LocalOnly {
+            // LocalOnly excludes env-based tool versions (MISE_*_VERSION).
+            return Ok(());
+        }
         for (k, v) in env {
             if k.starts_with("MISE_") && k.ends_with("_VERSION") && k != "MISE_VERSION" {
                 let plugin_name = k
                     .trim_start_matches("MISE_")
                     .trim_end_matches("_VERSION")
                     .to_lowercase();
-                if plugin_name == "install" {
-                    // ignore MISE_INSTALL_VERSION
+                if plugin_name == "install" || plugin_name == "tool" {
+                    // ignore MISE_INSTALL_VERSION and MISE_TOOL_VERSION (set during hooks)
                     continue;
                 }
                 let ba: Arc<BackendArg> = Arc::new(plugin_name.as_str().into());
@@ -118,9 +136,20 @@ impl ToolsetBuilder {
     fn load_runtime_args(&self, ts: &mut Toolset) -> eyre::Result<()> {
         for (_, args) in self.args.iter().into_group_map_by(|arg| arg.ba.clone()) {
             let mut arg_ts = Toolset::new(ToolSource::Argument);
+            // carry over options (e.g. filter_bins) from config for this tool
+            let config_options = ts
+                .versions
+                .get(&args[0].ba)
+                .and_then(|tvl| tvl.requests.first())
+                .map(|tvr| tvr.options());
+            let apply_arg_options = |mut tvr: ToolRequest, ba: &BackendArg| {
+                tvr.set_options(ba.opts_with_config(config_options.clone()));
+                tvr
+            };
             for arg in args {
                 if let Some(tvr) = &arg.tvr {
-                    arg_ts.add_version(tvr.clone());
+                    let tvr = apply_arg_options(tvr.clone(), arg.ba.as_ref());
+                    arg_ts.add_version(tvr);
                 } else if self.default_to_latest {
                     // this logic is required for `mise x` because with that specific command mise
                     // should default to installing the "latest" version if no version is specified
@@ -134,18 +163,18 @@ impl ToolsetBuilder {
 
                     if let Some(current_active) = current_active {
                         // active version, so don't set "latest"
-                        arg_ts.add_version(ToolRequest::new(
+                        let tvr = ToolRequest::new(
                             arg.ba.clone(),
                             &current_active.version(),
                             ToolSource::Argument,
-                        )?);
+                        )?;
+                        let tvr = apply_arg_options(tvr, arg.ba.as_ref());
+                        arg_ts.add_version(tvr);
                     } else {
                         // no active version, so use "latest"
-                        arg_ts.add_version(ToolRequest::new(
-                            arg.ba.clone(),
-                            "latest",
-                            ToolSource::Argument,
-                        )?);
+                        let tvr = ToolRequest::new(arg.ba.clone(), "latest", ToolSource::Argument)?;
+                        let tvr = apply_arg_options(tvr, arg.ba.as_ref());
+                        arg_ts.add_version(tvr);
                     }
                 }
             }

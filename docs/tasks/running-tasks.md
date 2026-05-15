@@ -15,7 +15,7 @@ By default, tasks will execute with a maximum of 4 parallel jobs. Customize this
 label. By printing line-by-line we avoid interleaving output from parallel executions. However, if
 --jobs == 1, the output will be set to `interleave`.
 
-To just print stdout/stderr directly, use `--interleave`, the `task_output` setting, or `MISE_TASK_OUTPUT=interleave`.
+To just print stdout/stderr directly, use `--interleave`, the `task.output` setting, or `MISE_TASK_OUTPUT=interleave`.
 
 Stdin is not read by default. To enable this, set `raw = true` on the task that needs it. This will prevent
 it running in parallel with any other task—a RWMutex will get a write lock in this case. This also prevents redactions applied to the output.
@@ -59,6 +59,16 @@ can also be used to further refine groups and simplify pattern matching.
 For example running `mise run test:**:local` will match`test:units:local`,
 `test:integration:local` and `test:e2e:happy:local`
 (See [Wildcards](#wildcards) for more information).
+
+::: tip
+Since TOML keys can't contain colons without quoting, use quoted keys in `mise.toml`:
+
+```toml
+[tasks."test:unit"]
+run = 'cargo test --lib'
+```
+
+:::
 
 ## Wildcards
 

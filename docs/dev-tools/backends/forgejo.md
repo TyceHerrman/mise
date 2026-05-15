@@ -4,7 +4,7 @@ You may install Codeberg and other Forgejo compatible release assets directly us
 
 By default, the Forgejo backend uses the public Codeberg instance at [https://codeberg.org](https://codeberg.org). For other or self-hosted Forgejo instances, you can specify a custom API URL using the `api_url` tool option.
 
-The code for this is inside of the mise repository at [`./src/backend/forgejo.rs`](https://github.com/jdx/mise/blob/main/src/backend/forgejo.rs).
+The code for this is inside of the mise repository at [`src/backend/github.rs`](https://github.com/jdx/mise/blob/main/src/backend/github.rs).
 
 ## Usage
 
@@ -26,6 +26,95 @@ The version will be set in `~/.config/mise/config.toml` with the following forma
   api_url = "https://code.forgejo.org/api/v1",
   bin = "forgejo-runner",
 }
+```
+
+## Authentication
+
+For private repositories or higher API limits, mise supports several Forgejo token sources.
+
+### Token priority
+
+mise checks these sources in order and uses the first token found:
+
+1. `MISE_FORGEJO_ENTERPRISE_TOKEN` (for non-`codeberg.org` hosts)
+2. `MISE_FORGEJO_TOKEN`
+3. `FORGEJO_TOKEN`
+4. `credential_command` (if set)
+5. `forgejo_tokens.toml` (per host)
+6. `fj` CLI config (`keys.json`, if enabled)
+7. `git credential fill` (if `forgejo.use_git_credentials=true`)
+
+### Environment variables
+
+```sh
+export MISE_FORGEJO_TOKEN="forgejo-token"
+```
+
+For self-hosted Forgejo instances:
+
+```sh
+export MISE_FORGEJO_ENTERPRISE_TOKEN="forgejo-enterprise-token"
+```
+
+### Token file (`forgejo_tokens.toml`)
+
+```toml
+# ~/.config/mise/forgejo_tokens.toml
+[tokens."codeberg.org"]
+token = "forgejo-public-token"
+
+[tokens."forgejo.mycompany.com"]
+token = "forgejo-enterprise-token"
+```
+
+### `credential_command`
+
+You can provide a shell command that prints a token to stdout:
+
+```toml
+[settings.forgejo]
+credential_command = "op read 'op://Private/Forgejo Token/credential'"
+```
+
+mise executes this command with the configured default inline shell. The target hostname is available as `MISE_CREDENTIAL_HOST`, and the provider name (`forgejo`) is available as `MISE_CREDENTIAL_PROVIDER`. For compatibility, recognized sh-compatible shells (`ash`, `bash`, `dash`, `ksh`, `sh`, and `zsh`) also receive the hostname as `$1`/`${1}`.
+
+:::: warning Planned deprecation
+The legacy `$1`/`${1}` hostname argument is deprecated. Use `MISE_CREDENTIAL_HOST` instead. mise will start warning in `2026.11.0`, and `$1` compatibility will be removed in `2027.11.0`.
+::::
+
+### `fj` CLI integration
+
+mise can read tokens from the [`fj` CLI](https://codeberg.org/forgejo-contrib/forgejo-cli) (`keys.json`) as a fallback. It checks:
+
+1. `$XDG_DATA_HOME/forgejo-cli/keys.json` (defaults to `~/.local/share/forgejo-cli/keys.json`)
+2. `~/Library/Application Support/Cyborus.forgejo-cli/keys.json` (macOS)
+
+Disable this fallback with:
+
+```toml
+[settings.forgejo]
+fj_cli_tokens = false
+```
+
+### `git credential fill` fallback
+
+As a last resort, mise can query git credential helpers:
+
+```toml
+[settings.forgejo]
+use_git_credentials = true
+```
+
+This uses `git credential fill` and supports credentials stored by helpers such as macOS Keychain.
+
+### Debugging token resolution
+
+Use `mise token forgejo` to see which token mise would use for a given host:
+
+```sh
+mise token forgejo
+mise token forgejo --unmask
+mise token forgejo forgejo.mycompany.com
 ```
 
 ## Tool Options
@@ -50,7 +139,7 @@ mise install forgejo:user/repo
 ```
 
 ::: tip
-The autodetection logic is implemented in [`src/backend/asset_detector.rs`](https://github.com/jdx/mise/blob/main/src/backend/asset_detector.rs), which is shared by the Forgejo, GitHub and GitLab backends.
+The autodetection logic is implemented in [`src/backend/asset_matcher.rs`](https://github.com/jdx/mise/blob/main/src/backend/asset_matcher.rs), which is shared by the Forgejo, GitHub and GitLab backends.
 :::
 
 ### `asset_pattern`
@@ -85,6 +174,23 @@ When `version_prefix` is configured, mise will:
 - With `version_prefix = ""` (empty string):
   - User specifies `1.0.0` → mise searches for `1.0.0` tag (no prefix)
   - Useful for repositories that don't use any prefix
+
+### `prerelease`
+
+By default, releases flagged `prerelease: true` on Forgejo are excluded from `mise ls-remote` and from `latest` resolution. Set `prerelease = true` to include them:
+
+```toml
+[tools]
+"forgejo:user/repo" = { version = "latest", prerelease = true }
+```
+
+When set:
+
+- Pre-release tags (e.g. `v1.0.0-rc1`, `v0.1.2-dev.86`) appear in `mise ls-remote`.
+- `latest` resolves to the newest version across stable and pre-releases, rather than taking the Forgejo `/repos/{owner}/{repo}/releases/latest` shortcut.
+- Fuzzy version queries (e.g. `1.2`) match pre-release tags under that prefix.
+
+Draft releases are always excluded.
 
 ### Platform-specific Asset Patterns
 
@@ -180,9 +286,28 @@ rename_exe = "tool"  # Rename the extracted binary to tool
 Use `rename_exe` for archives where the binary inside has a different name than desired. Use `bin` for single binary downloads (non-archives).
 :::
 
+### `no_app`
+
+Skip macOS .app bundle assets during autodetection and prefer standalone CLI binaries instead. This is useful when a repository provides both a macOS .app bundle (often an Xcode extension or GUI application) and a standalone command-line tool:
+
+```toml
+[tools."forgejo:user/repo"]
+version = "latest"
+no_app = true
+```
+
+When `no_app = true`:
+
+- Assets containing `.app.` (e.g., `Tool.app.zip`, `Tool.for.Xcode.app.zip`) are penalized during autodetection
+- Standalone archives are preferred
+- This is mainly useful for macOS asset selection; non-macOS `.app.` assets are already penalized by platform matching
+- Only affects autodetection; explicit `asset_pattern` values are used as-is
+
 ### `bin_path`
 
+::: v-pre
 Specify the directory containing binaries within the extracted archive, or where to place the downloaded file. This supports Tera templating with variables like `{{ version }}`, `{{ os }}`, `{{ arch }}`, and arch aliases (`{{ darwin_os }}`, `{{ amd64_arch }}`, `{{ x86_64_arch }}`, `{{ gnu_arch }}`):
+:::
 
 ```toml
 [tools."forgejo:user/repo"]
@@ -215,7 +340,7 @@ When enabled:
 
 ### `api_url`
 
-For other Forgejo compatible or self-hosted instances, specify the API URL:
+For other Forgejo compatible or self-hosted instances, specify the API URL. mise uses this URL for release listing and release asset lookup, and may also use it to download assets when browser download URLs are not reachable or when using custom/private instances:
 
 ```toml
 [tools]
@@ -240,4 +365,5 @@ export MISE_FORGEJO_ENTERPRISE_TOKEN="your-token"
 <script setup>
 import Settings from '/components/settings.vue';
 </script>
+
 <Settings child="forgejo" :level="3" />

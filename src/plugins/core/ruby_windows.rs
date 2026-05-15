@@ -6,6 +6,7 @@ use std::{
 
 use crate::backend::Backend;
 use crate::backend::VersionInfo;
+use crate::backend::normalize_idiomatic_contents;
 use crate::cli::args::BackendArg;
 use crate::cmd::CmdLineRunner;
 use crate::config::{Config, Settings};
@@ -17,7 +18,7 @@ use crate::toolset::{ToolVersion, Toolset};
 use crate::ui::progress_report::SingleReport;
 use crate::{file, github, plugins};
 use async_trait::async_trait;
-use eyre::Result;
+use eyre::{Result, bail};
 use itertools::Itertools;
 use versions::Versioning;
 use xx::regex;
@@ -111,11 +112,7 @@ impl RubyPlugin {
     }
 
     async fn download(&self, tv: &ToolVersion, pr: &dyn SingleReport) -> Result<PathBuf> {
-        let arch = arch();
-        let url = format!(
-            "https://github.com/oneclick/rubyinstaller2/releases/download/RubyInstaller-{version}-1/rubyinstaller-{version}-1-{arch}.7z",
-            version = tv.version,
-        );
+        let url = super::ruby_common::rubyinstaller_url(&tv.version);
         let filename = url.split('/').next_back().unwrap();
         let tarball_path = tv.download_path().join(filename);
 
@@ -136,7 +133,7 @@ impl RubyPlugin {
         ctx.pr.set_message(format!("extract {filename}"));
         file::remove_all(tv.install_path())?;
         file::un7z(tarball_path, &tv.download_path(), &Default::default())?;
-        file::rename(
+        file::move_file(
             tv.download_path()
                 .join(format!("rubyinstaller-{}-1-{arch}", tv.version)),
             tv.install_path(),
@@ -181,23 +178,26 @@ impl Backend for RubyPlugin {
         Ok(versions)
     }
 
-    async fn idiomatic_filenames(&self) -> Result<Vec<String>> {
+    async fn _idiomatic_filenames(&self) -> Result<Vec<String>> {
         Ok(vec![".ruby-version".into(), "Gemfile".into()])
     }
 
-    async fn parse_idiomatic_file(&self, path: &Path) -> Result<String> {
+    async fn _parse_idiomatic_file(&self, path: &Path) -> Result<Vec<String>> {
         let v = match path.file_name() {
             Some(name) if name == "Gemfile" => parse_gemfile(&file::read_to_string(path)?),
             _ => {
                 // .ruby-version
-                let body = file::read_to_string(path)?;
+                let body = normalize_idiomatic_contents(&file::read_to_string(path)?);
                 body.trim()
                     .trim_start_matches("ruby-")
                     .trim_start_matches('v')
                     .to_string()
             }
         };
-        Ok(v)
+        if v.is_empty() {
+            return Ok(vec![]);
+        }
+        Ok(vec![v])
     }
 
     async fn install_version_(
@@ -205,6 +205,13 @@ impl Backend for RubyPlugin {
         ctx: &InstallContext,
         mut tv: ToolVersion,
     ) -> eyre::Result<ToolVersion> {
+        if !super::ruby_common::is_mri_version(&tv.version) {
+            bail!(
+                "Ruby engine '{}' is not supported on Windows.\n\
+                 Only standard MRI Ruby versions can be installed via RubyInstaller2.",
+                tv.version
+            );
+        }
         let tarball = self.download(&tv, ctx.pr.as_ref()).await?;
         self.verify_checksum(ctx, &mut tv, &tarball)?;
         self.install(ctx, &tv, &tarball).await?;

@@ -1,5 +1,8 @@
-backends = [
-  "github:coursier/coursier[exe=cs]",
-  "asdf:jiahuili430/asdf-coursier",
-]
 description = "Pure Scala Artifact Fetching"
+# test = { cmd = "cs --help", expected = "Coursier is the Scala application" }
+
+[[backends]]
+full = "github:coursier/coursier"
+
+[[backends]]
+full = "asdf:jiahuili430/asdf-coursier"

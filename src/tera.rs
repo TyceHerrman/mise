@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::iter::once;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 use heck::{
     ToKebabCase, ToLowerCamelCase, ToShoutyKebabCase, ToShoutySnakeCase, ToSnakeCase,
@@ -16,7 +17,55 @@ use crate::cache::CacheManagerBuilder;
 use crate::cmd::cmd;
 use crate::config::Settings;
 use crate::env_diff::EnvMap;
+use crate::file::strip_shims_from_path;
 use crate::{dirs, duration, env, hash};
+
+/// Global tracker for files accessed during tera template rendering.
+/// Functions like `read_file`, `hash_file`, `file_size`, and `last_modified`
+/// push paths here so that hook-env can watch them for changes.
+static TERA_ACCESSED_FILES: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+
+fn track_tera_file(path: &Path) {
+    if let Ok(mut files) = TERA_ACCESSED_FILES.lock() {
+        files.push(path.to_path_buf());
+    }
+}
+
+/// Take all tracked files, clearing the global list.
+pub fn take_tera_accessed_files() -> Vec<PathBuf> {
+    let mut files = TERA_ACCESSED_FILES
+        .lock()
+        .map(|mut f| std::mem::take(&mut *f))
+        .unwrap_or_default();
+    files.sort();
+    files.dedup();
+    files
+}
+
+/// Fast marker check for Tera 1.x syntax.
+///
+/// Tera 1.20.1's grammar starts every variable, tag, and comment block with
+/// `{{`, `{%`, or `{#` respectively, including whitespace-trimmed forms like
+/// `{{-`, `{%-`, and `{#-`.
+pub fn contains_template_syntax(input: &str) -> bool {
+    input.contains("{{") || input.contains("{%") || input.contains("{#")
+}
+
+pub fn render_str_if_template(
+    tera: &mut Tera,
+    input: &str,
+    context: &Context,
+) -> tera::Result<String> {
+    if contains_template_syntax(input) {
+        render_str(tera, input, context)
+    } else {
+        Ok(input.to_string())
+    }
+}
+
+pub fn render_str(tera: &mut Tera, input: &str, context: &Context) -> tera::Result<String> {
+    tera.render_str(input, context)
+}
 
 pub static BASE_CONTEXT: Lazy<Context> = Lazy::new(|| {
     let mut context = Context::new();
@@ -129,6 +178,7 @@ static TERA: Lazy<Tera> = Lazy::new(|| {
         move |input: &Value, args: &HashMap<String, Value>| match input {
             Value::String(s) => {
                 let path = Path::new(s);
+                track_tera_file(path);
                 let mut hash = hash::file_hash_blake3(path, None).unwrap();
                 if let Some(len) = args.get("len").and_then(Value::as_u64) {
                     hash = hash.chars().take(len as usize).collect();
@@ -230,6 +280,7 @@ static TERA: Lazy<Tera> = Lazy::new(|| {
         move |input: &Value, _args: &HashMap<String, Value>| match input {
             Value::String(s) => {
                 let p = Path::new(s);
+                track_tera_file(p);
                 let metadata = p.metadata()?;
                 let size = metadata.len();
                 Ok(Value::Number(size.into()))
@@ -242,6 +293,7 @@ static TERA: Lazy<Tera> = Lazy::new(|| {
         move |input: &Value, _args: &HashMap<String, Value>| match input {
             Value::String(s) => {
                 let p = Path::new(s);
+                track_tera_file(p);
                 let metadata = p.metadata()?;
                 let modified = metadata.modified()?;
                 let modified = modified.duration_since(std::time::UNIX_EPOCH).unwrap();
@@ -356,6 +408,14 @@ static TERA: Lazy<Tera> = Lazy::new(|| {
     tera
 });
 
+/// Returns a Tera instance for use during early initialization (miserc loading).
+/// This is a plain clone of the global `TERA` static. `exec` and `read_file` are absent
+/// because they are only registered in [`get_tera`], not in `TERA` itself — so they
+/// cannot accidentally become available here if `TERA` changes in the future.
+pub fn get_miserc_tera() -> Tera {
+    TERA.clone()
+}
+
 pub fn get_tera(dir: Option<&Path>) -> Tera {
     let mut tera = TERA.clone();
     let dir = dir.map(PathBuf::from);
@@ -395,7 +455,16 @@ pub fn tera_exec(
                     .skip(1)
                     .chain(once(command))
                     .collect::<Vec<&String>>();
-                let mut cmd: duct::Expression = cmd(&shell[0], args).full_env(&env);
+                // Strip mise shims from PATH to prevent infinite recursion
+                // when the command (e.g. `gh auth token`) is a mise-managed
+                // tool. Without this, the shim re-enters mise, which may
+                // evaluate the same template again indefinitely.
+                let mut env_no_shims = env.clone();
+                if let Some(path_val) = env_no_shims.get(&*env::PATH_KEY).cloned() {
+                    env_no_shims
+                        .insert(env::PATH_KEY.to_string(), strip_shims_from_path(&path_val));
+                }
+                let mut cmd: duct::Expression = cmd(&shell[0], args).full_env(&env_no_shims);
                 if let Some(dir) = &dir {
                     cmd = cmd.dir(dir);
                 }
@@ -445,6 +514,7 @@ pub fn tera_read_file(
                     PathBuf::from(path_str)
                 };
 
+                track_tera_file(&path);
                 match std::fs::read_to_string(&path) {
                     Ok(contents) => Ok(Value::String(contents)),
                     Err(e) => {
@@ -773,6 +843,38 @@ mod tests {
         assert_eq!(s.trim(), "ok");
     }
 
+    #[test]
+    fn test_contains_template_syntax() {
+        assert!(contains_template_syntax("{{ foo }}"));
+        assert!(contains_template_syntax("{{- foo -}}"));
+        assert!(contains_template_syntax("{% if foo %}bar{% endif %}"));
+        assert!(contains_template_syntax("{%- if foo -%}bar{%- endif -%}"));
+        assert!(contains_template_syntax("{# comment #}"));
+        assert!(contains_template_syntax("{#- comment -#}"));
+        assert!(!contains_template_syntax("plain text"));
+    }
+
+    #[test]
+    fn test_render_str_if_template_skips_plain_text() {
+        let mut tera = Tera::default();
+        let ctx = Context::new();
+        assert_eq!(
+            render_str_if_template(&mut tera, "plain text", &ctx).unwrap(),
+            "plain text"
+        );
+    }
+
+    #[test]
+    fn test_render_str_if_template_renders_template() {
+        let mut tera = Tera::default();
+        let mut ctx = Context::new();
+        ctx.insert("name", "world");
+        assert_eq!(
+            render_str_if_template(&mut tera, "hello {{ name }}", &ctx).unwrap(),
+            "hello world"
+        );
+    }
+
     #[tokio::test]
     #[cfg(unix)]
     async fn test_read_file() {
@@ -792,15 +894,17 @@ mod tests {
         tera_ctx.insert("cwd", temp_dir.path().to_str().unwrap());
         let mut tera = get_tera(Some(temp_dir.path()));
 
-        let s = tera
-            .render_str(r#"{{ read_file(path="test.txt") }}"#, &tera_ctx)
+        let s = render_str_if_template(&mut tera, r#"{{ read_file(path="test.txt") }}"#, &tera_ctx)
             .unwrap();
         assert_eq!(s, "test content\nwith multiple lines");
 
         // Test with trim filter
-        let s = tera
-            .render_str(r#"{{ read_file(path="test.txt") | trim }}"#, &tera_ctx)
-            .unwrap();
+        let s = render_str_if_template(
+            &mut tera,
+            r#"{{ read_file(path="test.txt") | trim }}"#,
+            &tera_ctx,
+        )
+        .unwrap();
         assert_eq!(s, "test content\nwith multiple lines");
     }
 
@@ -810,6 +914,6 @@ mod tests {
         tera_ctx.insert("config_root", &config_root);
         tera_ctx.insert("cwd", "/");
         let mut tera = get_tera(Option::from(config_root));
-        tera.render_str(s, &tera_ctx).unwrap()
+        render_str_if_template(&mut tera, s, &tera_ctx).unwrap()
     }
 }

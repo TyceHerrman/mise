@@ -46,9 +46,9 @@ impl Bootstrap {
 
     async fn generate(&self) -> Result<String> {
         let url = if let Some(v) = &self.version {
-            format!("https://mise.jdx.dev/v{v}/install.sh")
+            format!("https://mise.en.dev/v{v}/install.sh")
         } else {
-            "https://mise.jdx.dev/install.sh".into()
+            "https://mise.en.dev/install.sh".into()
         };
         let install = HTTP.get_text(&url).await?;
         let install_sig = HTTP.get_text(format!("{url}.minisig")).await?;
@@ -102,7 +102,7 @@ __mise_bootstrap() {{
     test -f "$MISE_INSTALL_PATH" || install
 }}
 __mise_bootstrap
-exec "$MISE_INSTALL_PATH" "$@"
+exec -a "$0" "$MISE_INSTALL_PATH" "$@"
 "#
         );
         Ok(script.trim().to_string())

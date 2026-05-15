@@ -1,6 +1,7 @@
 use color_eyre::eyre::Context;
 use eyre::Result;
 use std::ffi::OsString;
+use std::future::Future;
 use std::sync::Arc;
 use std::sync::LazyLock as Lazy;
 
@@ -9,11 +10,12 @@ use crate::cli::args::{BackendArg, BackendResolution};
 use crate::config::Settings;
 use crate::env;
 use crate::path_env::PathEnv;
-use crate::timeout::{TimeoutError, run_with_timeout};
+use crate::timeout::{TimeoutError, run_with_timeout, run_with_timeout_async};
 use crate::toolset::ToolVersion;
 
 mod bun;
 mod deno;
+mod dotnet;
 mod elixir;
 mod erlang;
 mod go;
@@ -22,6 +24,7 @@ mod node;
 pub(crate) mod python;
 #[cfg_attr(windows, path = "ruby_windows.rs")]
 mod ruby;
+mod ruby_common;
 mod rust;
 mod swift;
 mod zig;
@@ -30,6 +33,7 @@ pub static CORE_PLUGINS: Lazy<BackendMap> = Lazy::new(|| {
     let plugins: Vec<Arc<dyn Backend>> = vec![
         Arc::new(bun::BunPlugin::new()),
         Arc::new(deno::DenoPlugin::new()),
+        Arc::new(dotnet::DotnetPlugin::new()),
         Arc::new(elixir::ElixirPlugin::new()),
         Arc::new(erlang::ErlangPlugin::new()),
         Arc::new(go::GoPlugin::new()),
@@ -63,6 +67,27 @@ where
         Ok(v) => Ok(v),
         Err(err) => {
             // Only add a hint when the error was actually caused by a timeout
+            if err.downcast_ref::<TimeoutError>().is_some() {
+                Err(err).context(
+                    "change with `fetch_remote_versions_timeout` or env `MISE_FETCH_REMOTE_VERSIONS_TIMEOUT`",
+                )
+            } else {
+                Err(err)
+            }
+        }
+    }
+}
+
+pub async fn run_fetch_task_with_timeout_async<F, Fut, T>(f: F) -> Result<T>
+where
+    Fut: Future<Output = Result<T>> + Send,
+    T: Send,
+    F: FnOnce() -> Fut,
+{
+    let timeout = Settings::get().fetch_remote_versions_timeout();
+    match run_with_timeout_async(f, timeout).await {
+        Ok(v) => Ok(v),
+        Err(err) => {
             if err.downcast_ref::<TimeoutError>().is_some() {
                 Err(err).context(
                     "change with `fetch_remote_versions_timeout` or env `MISE_FETCH_REMOTE_VERSIONS_TIMEOUT`",

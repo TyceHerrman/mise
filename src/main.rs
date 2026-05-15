@@ -36,6 +36,8 @@ pub(crate) mod build_time;
 mod cache;
 mod cli;
 mod config;
+mod deps;
+pub(crate) mod deps_graph;
 mod direnv;
 mod dirs;
 pub(crate) mod duration;
@@ -55,6 +57,7 @@ mod hash;
 mod hook_env;
 mod hooks;
 mod http;
+mod install_before;
 mod install_context;
 mod lock_file;
 mod lockfile;
@@ -63,18 +66,18 @@ pub(crate) mod maplit;
 mod migrate;
 mod minisign;
 mod netrc;
-mod package_json;
+mod oci;
 pub(crate) mod parallel;
 mod path;
 mod path_env;
 mod platform;
 mod plugins;
-mod prepare;
 mod rand;
 mod redactions;
 mod registry;
 pub(crate) mod result;
 mod runtime_symlinks;
+mod sandbox;
 mod semver;
 mod shell;
 mod shims;
@@ -84,6 +87,7 @@ mod sysconfig;
 pub(crate) mod task;
 pub(crate) mod tera;
 pub(crate) mod timeout;
+mod tokens;
 mod toml;
 mod toolset;
 mod ui;
@@ -147,6 +151,10 @@ fn handle_err(err: Report) -> eyre::Result<()> {
     {
         return Ok(());
     }
+    if is_interrupted_io_error(&err) {
+        stop_multi_progress();
+        exit(130);
+    }
 
     // Check for miette diagnostic errors and render them specially
     if let Some(diagnostic) = err.downcast_ref::<config::config_file::diagnostic::MiseDiagnostic>()
@@ -168,14 +176,13 @@ fn show_github_rate_limit_err(err: &Report) {
     let msg = format!("{err:?}");
     if msg.contains("HTTP status client error (403 Forbidden) for url (https://api.github.com") {
         warn!(
-            "GitHub API returned a 403 Forbidden error. This likely means you have exceeded the rate limit."
+            "GitHub API returned a 403 Forbidden error. This is most commonly caused by exceeding the rate limit, though other causes (e.g. insufficient token permissions) are possible."
         );
-        if env::GITHUB_TOKEN.is_none() {
+        if github::resolve_token("github.com").is_none() {
             warn!(indoc!(
-                r#"GITHUB_TOKEN is not set. This means mise is making unauthenticated requests to GitHub which have a lower rate limit.
-                   To increase the rate limit, set the GITHUB_TOKEN environment variable to a GitHub personal access token.
-                   Create a token at https://github.com/settings/tokens and set it as GITHUB_TOKEN in your environment.
-                   You do not need to give this token any scopes."#
+                r#"No GitHub token was found, so mise is making unauthenticated requests to GitHub which have a much lower rate limit.
+                   Create a token at https://github.com/settings/tokens (no scopes required) and set it as GITHUB_TOKEN in your environment.
+                   See https://mise.en.dev/dev-tools/github-tokens.html for all supported token sources (env vars, gh CLI, credential_command, etc.)."#
             ));
         }
     }
@@ -187,6 +194,20 @@ fn display_friendly_err(err: &Report) {
     }
     let msg = ui::style::edim("Run with --verbose or MISE_VERBOSE=1 for more information");
     error!("{msg}");
+}
+
+fn is_interrupted_io_error(err: &Report) -> bool {
+    err.chain().any(|cause| {
+        cause
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(|e| e.kind() == std::io::ErrorKind::Interrupted)
+    })
+}
+
+fn stop_multi_progress() {
+    if let Some(mpr) = MultiProgressReport::try_get() {
+        let _ = mpr.stop();
+    }
 }
 
 static ASYNC_PANIC_OCCURRED: AtomicBool = AtomicBool::new(false);
@@ -219,4 +240,21 @@ pub fn install_panic_hook() {
 
         default_hook(panic_info);
     }));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use eyre::eyre;
+
+    #[test]
+    fn detects_interrupted_io_error() {
+        assert!(is_interrupted_io_error(&eyre!(std::io::Error::new(
+            std::io::ErrorKind::Interrupted,
+            "user cancelled"
+        ))));
+        assert!(!is_interrupted_io_error(&eyre!(std::io::Error::other(
+            "user cancelled"
+        ))));
+    }
 }

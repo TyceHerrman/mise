@@ -1,5 +1,5 @@
 // If not being published, these need to manually downloaded from https://github.com/withfig/autocomplete/tree/master/src
-/* eslint-disable @withfig/fig-linter/conventional-descriptions */
+
 import { createNpmSearchHandler } from "./npm";
 import { searchGenerator as createCargoSearchGenerator } from "./cargo";
 
@@ -654,7 +654,7 @@ const completionSpec: Fig.Spec = {
       ],
     },
     {
-      name: ["backends", "b"],
+      name: "backends",
       description: "Manage backends",
       subcommands: [
         {
@@ -666,6 +666,19 @@ const completionSpec: Fig.Spec = {
     {
       name: "bin-paths",
       description: "List all the active runtime bin paths",
+      options: [
+        {
+          name: "--bin-names",
+          description: "Output executable names instead of bin directories",
+          isRepeatable: false,
+        },
+        {
+          name: ["-J", "--json"],
+          description:
+            "Output executable entries in JSON format (implies --bin-names)",
+          isRepeatable: false,
+        },
+      ],
       args: {
         name: "tool@version",
         description: "Tool(s) to look up\ne.g.: ruby@3",
@@ -973,13 +986,79 @@ const completionSpec: Fig.Spec = {
           },
         },
         {
+          name: "--allow-env",
+          description:
+            "[experimental] Allow specific env var through (implies --deny-env for everything else)\nSupports wildcards, e.g. --allow-env='MYAPP_*'",
+          isRepeatable: true,
+          args: {
+            name: "var",
+          },
+        },
+        {
+          name: "--allow-net",
+          description:
+            "[experimental] Allow network to specific host (implies --deny-net for everything else)\nmacOS only in v1; on Linux falls back to allowing all network",
+          isRepeatable: true,
+          args: {
+            name: "host",
+          },
+        },
+        {
+          name: "--allow-read",
+          description:
+            "[experimental] Allow reads from specific path (implies --deny-read for everything else)",
+          isRepeatable: true,
+          args: {
+            name: "path",
+            template: "filepaths",
+          },
+        },
+        {
+          name: "--allow-write",
+          description:
+            "[experimental] Allow writes to specific path (implies --deny-write for everything else)",
+          isRepeatable: true,
+          args: {
+            name: "path",
+            template: "filepaths",
+          },
+        },
+        {
+          name: "--deny-all",
+          description:
+            "[experimental] Block reads, writes, network, and env vars",
+          isRepeatable: false,
+        },
+        {
+          name: "--deny-env",
+          description:
+            "[experimental] Block env var inheritance (only PATH, HOME, USER, SHELL, TERM, LANG pass through)",
+          isRepeatable: false,
+        },
+        {
+          name: "--deny-net",
+          description: "[experimental] Block all network access",
+          isRepeatable: false,
+        },
+        {
+          name: "--deny-read",
+          description:
+            "[experimental] Block filesystem reads (system libs and tool dirs still accessible)",
+          isRepeatable: false,
+        },
+        {
+          name: "--deny-write",
+          description: "[experimental] Block all filesystem writes",
+          isRepeatable: false,
+        },
+        {
           name: "--fresh-env",
           description:
             "Bypass the environment cache and recompute the environment",
           isRepeatable: false,
         },
         {
-          name: "--no-prepare",
+          name: "--no-deps",
           description: "Skip automatic dependency preparation",
           isRepeatable: false,
         },
@@ -1445,6 +1524,20 @@ const completionSpec: Fig.Spec = {
             "Directly pipe stdin/stdout/stderr from plugin to user Sets --jobs=1",
           isRepeatable: false,
         },
+        {
+          name: "--shared",
+          description: "[experimental] Install tool(s) to a shared directory",
+          isRepeatable: false,
+          args: {
+            name: "shared",
+          },
+        },
+        {
+          name: "--system",
+          description:
+            "[experimental] Install tool(s) to the system-wide shared directory",
+          isRepeatable: false,
+        },
       ],
       args: {
         name: "tool@version",
@@ -1480,6 +1573,14 @@ const completionSpec: Fig.Spec = {
           name: ["-i", "--installed"],
           description: "Show latest installed instead of available version",
           isRepeatable: false,
+        },
+        {
+          name: "--before",
+          description: "Only consider versions released before this date",
+          isRepeatable: false,
+          args: {
+            name: "before",
+          },
         },
       ],
       args: {
@@ -1520,6 +1621,12 @@ const completionSpec: Fig.Spec = {
         "Update lockfile checksums and URLs for all specified platforms",
       options: [
         {
+          name: ["-g", "--global"],
+          description:
+            "Target only global config lockfiles (~/.config/mise/mise.lock and system config)\nBy default, only the active project config root is locked",
+          isRepeatable: false,
+        },
+        {
           name: ["-j", "--jobs"],
           description: "Number of jobs to run in parallel",
           isRepeatable: false,
@@ -1546,6 +1653,14 @@ const completionSpec: Fig.Spec = {
           description:
             "Update mise.local.lock instead of mise.lock\nUse for tools defined in .local.toml configs",
           isRepeatable: false,
+        },
+        {
+          name: "--minimum-release-age",
+          description: "Only lock versions released before this age or date",
+          isRepeatable: false,
+          args: {
+            name: "minimum_release_age",
+          },
         },
       ],
       args: {
@@ -1650,9 +1765,33 @@ const completionSpec: Fig.Spec = {
           isRepeatable: false,
         },
         {
+          name: "--minimum-release-age",
+          description: "Only show versions released before this age or date",
+          isRepeatable: false,
+          args: {
+            name: "minimum_release_age",
+          },
+        },
+        {
           name: ["-J", "--json"],
           description:
             "Output in JSON format (includes version metadata like created_at timestamps when available)",
+          isRepeatable: false,
+        },
+        {
+          name: "--no-versions-host",
+          description: "Disable checking the mise-versions host",
+          isRepeatable: false,
+        },
+        {
+          name: "--prerelease",
+          description:
+            "Include pre-release versions in the output for backends that report\nupstream prerelease metadata or opt in to regex-based prerelease\ndetection. Equivalent to setting `MISE_PRERELEASES=1` or the\n`prereleases` setting for the duration of this command.",
+          isRepeatable: false,
+        },
+        {
+          name: "--strict-metadata",
+          description: "Fail if release metadata fetches fail",
           isRepeatable: false,
         },
       ],
@@ -1681,6 +1820,239 @@ const completionSpec: Fig.Spec = {
       description: "[experimental] Run Model Context Protocol (MCP) server",
     },
     {
+      name: "oci",
+      description: "[experimental] Build OCI container images from a mise.toml",
+      subcommands: [
+        {
+          name: "build",
+          description:
+            "[experimental] Build an OCI image from the current mise.toml",
+          options: [
+            {
+              name: ["-o", "--output"],
+              description: "Output directory for the OCI image layout",
+              isRepeatable: false,
+              args: {
+                name: "output",
+              },
+            },
+            {
+              name: "--from",
+              description:
+                "Base image reference (overrides [oci].from and the oci.default_from setting)",
+              isRepeatable: false,
+              args: {
+                name: "from",
+              },
+            },
+            {
+              name: "--include-global",
+              description:
+                "Also include tools from the global / system config (default: project-only)",
+              isRepeatable: false,
+            },
+            {
+              name: ["-t", "--tag"],
+              description:
+                "Tag to record in the image index (the org.opencontainers.image.ref.name annotation)",
+              isRepeatable: false,
+              args: {
+                name: "tag",
+              },
+            },
+            {
+              name: "--mount-point",
+              description:
+                "Where to place tool installs inside the image (default: /mise)",
+              isRepeatable: false,
+              args: {
+                name: "mount_point",
+              },
+            },
+            {
+              name: "--no-mise",
+              description:
+                "Do not embed the currently-running mise binary at /usr/local/bin/mise",
+              isRepeatable: false,
+            },
+          ],
+        },
+        {
+          name: "push",
+          description:
+            "[experimental] Build an OCI image and push it to a registry",
+          options: [
+            {
+              name: "--from",
+              description:
+                "Base image for the build (ignored with --image-dir)",
+              isRepeatable: false,
+              args: {
+                name: "from",
+              },
+            },
+            {
+              name: "--image-dir",
+              description:
+                "Push an already-built OCI image layout (skip the build step)",
+              isRepeatable: false,
+              args: {
+                name: "image_dir",
+                template: "folders",
+              },
+            },
+            {
+              name: "--include-global",
+              description:
+                "Also include tools from the global / system config (default: project-only)",
+              isRepeatable: false,
+            },
+            {
+              name: "--mount-point",
+              description:
+                "Override in-image mount point (ignored with --image-dir)",
+              isRepeatable: false,
+              args: {
+                name: "mount_point",
+              },
+            },
+            {
+              name: "--no-mise",
+              description:
+                "Don't embed the mise binary (ignored with --image-dir)",
+              isRepeatable: false,
+            },
+            {
+              name: "--tool",
+              description:
+                "Force the push tool (`auto`, `skopeo`, `crane`). Default `auto`",
+              isRepeatable: false,
+              args: {
+                name: "tool",
+                generators: completionGeneratorTemplate(
+                  `mise registry --complete`
+                ),
+                suggestions: ["auto", "skopeo", "crane"],
+                debounce: true,
+              },
+            },
+          ],
+          args: {
+            name: "ref",
+            description:
+              "Destination registry reference (e.g. `ghcr.io/me/devenv:latest`)",
+          },
+        },
+        {
+          name: "run",
+          description:
+            "[experimental] Build an OCI image from the current mise.toml and run a command in it",
+          options: [
+            {
+              name: "--engine",
+              description:
+                "Container engine to use (`auto`, `podman`, or `docker`)",
+              isRepeatable: false,
+              args: {
+                name: "engine",
+                suggestions: ["auto", "podman", "docker"],
+              },
+            },
+            {
+              name: "--from",
+              description:
+                "Base image reference for the build (ignored with --image-dir)",
+              isRepeatable: false,
+              args: {
+                name: "from",
+              },
+            },
+            {
+              name: "--image-dir",
+              description:
+                "Use an already-built OCI image layout instead of building fresh",
+              isRepeatable: false,
+              args: {
+                name: "image_dir",
+                template: "folders",
+              },
+            },
+            {
+              name: "--include-global",
+              description:
+                "Also include tools from the global / system config (default: project-only)",
+              isRepeatable: false,
+            },
+            {
+              name: "--keep",
+              description:
+                "Keep the loaded image in the engine's storage after the run",
+              isRepeatable: false,
+            },
+            {
+              name: "--mount-point",
+              description:
+                "Override in-image mount point (ignored with --image-dir)",
+              isRepeatable: false,
+              args: {
+                name: "mount_point",
+              },
+            },
+            {
+              name: "--no-mise",
+              description:
+                "Don't embed the mise binary (ignored with --image-dir)",
+              isRepeatable: false,
+            },
+            {
+              name: "--volume",
+              description:
+                "Bind-mount a host path (repeatable, `HOST:CONTAINER[:MODE]`)",
+              isRepeatable: true,
+              args: {
+                name: "host:container",
+              },
+            },
+            {
+              name: ["-e", "--env"],
+              description:
+                "Set environment variable in the container (repeatable, `KEY=VAL`)",
+              isRepeatable: true,
+              args: {
+                name: "key=val",
+              },
+            },
+            {
+              name: ["-i", "--interactive"],
+              description: "Run interactively (pass `-i` to the engine)",
+              isRepeatable: false,
+            },
+            {
+              name: ["-t", "--tty"],
+              description: "Allocate a TTY (pass `-t` to the engine)",
+              isRepeatable: false,
+            },
+            {
+              name: ["-w", "--workdir"],
+              description: "Working directory inside the container",
+              isRepeatable: false,
+              args: {
+                name: "workdir",
+                template: "folders",
+              },
+            },
+          ],
+          args: {
+            name: "cmd",
+            description:
+              "Command and arguments to run inside the container (after `--`)",
+            isOptional: true,
+            isVariadic: true,
+          },
+        },
+      ],
+    },
+    {
       name: "outdated",
       description: "Shows outdated tool versions",
       options: [
@@ -1693,6 +2065,17 @@ const completionSpec: Fig.Spec = {
           name: ["-l", "--bump"],
           description:
             "Compares against the latest versions available, not what matches the current config",
+          isRepeatable: false,
+        },
+        {
+          name: "--inactive",
+          description:
+            "Show outdated tools including installed-but-inactive tools not present in the current config",
+          isRepeatable: false,
+        },
+        {
+          name: "--local",
+          description: "Only show outdated tools defined in local config files",
           isRepeatable: false,
         },
         {
@@ -1710,6 +2093,23 @@ const completionSpec: Fig.Spec = {
         generators: toolVersionGenerator,
         debounce: true,
       },
+    },
+    {
+      name: "patrons",
+      description:
+        "Show the individuals supporting mise as Patron-tier members",
+      options: [
+        {
+          name: ["-J", "--json"],
+          description: "Output in JSON format",
+          isRepeatable: false,
+        },
+        {
+          name: "--refresh",
+          description: "Bypass the local cache and re-fetch",
+          isRepeatable: false,
+        },
+      ],
     },
     {
       name: ["plugins", "p"],
@@ -1748,7 +2148,7 @@ const completionSpec: Fig.Spec = {
             {
               name: "new_plugin",
               description:
-                "The name of the plugin to install\ne.g.: node, ruby\nCan specify multiple plugins: `mise plugins install node ruby python`",
+                "The name of the plugin to install\ne.g.: cmake, poetry\nCan specify multiple plugins: `mise plugins install cmake poetry`",
               isOptional: true,
               generators: completionGeneratorTemplate(`mise plugins --all`),
               debounce: true,
@@ -1773,11 +2173,11 @@ const completionSpec: Fig.Spec = {
           args: [
             {
               name: "name",
-              description: "The name of the plugin\ne.g.: node, ruby",
+              description: "The name of the plugin\ne.g.: cmake, poetry",
             },
             {
               name: "dir",
-              description: "The local path to the plugin\ne.g.: ./mise-node",
+              description: "The local path to the plugin\ne.g.: ./vfox-cmake",
               isOptional: true,
               template: "folders",
             },
@@ -1788,9 +2188,15 @@ const completionSpec: Fig.Spec = {
           description: "List installed plugins",
           options: [
             {
+              name: ["-o", "--outdated"],
+              description:
+                "Show plugins with available updates\nChecks the remote for newer versions and only displays plugins that are outdated",
+              isRepeatable: false,
+            },
+            {
               name: ["-u", "--urls"],
               description:
-                "Show the git url for each plugin\ne.g.: https://github.com/asdf-vm/asdf-nodejs.git",
+                "Show the git url for each plugin\ne.g.: https://github.com/mise-plugins/vfox-cmake.git",
               isRepeatable: false,
             },
           ],
@@ -1871,7 +2277,7 @@ const completionSpec: Fig.Spec = {
         {
           name: ["-u", "--urls"],
           description:
-            "Show the git url for each plugin\ne.g.: https://github.com/asdf-vm/asdf-nodejs.git",
+            "Show the git url for each plugin\ne.g.: https://github.com/mise-plugins/vfox-cmake.git",
           isRepeatable: false,
         },
         {
@@ -1882,27 +2288,112 @@ const completionSpec: Fig.Spec = {
       ],
     },
     {
-      name: ["prepare", "prep"],
-      description: "[experimental] Ensure project dependencies are ready",
+      name: ["deps", "dep"],
+      description: "[experimental] Manage project dependencies",
+      subcommands: [
+        {
+          name: "add",
+          description: "Add a dependency",
+          options: [
+            {
+              name: ["-D", "--dev"],
+              description: "Add as a development dependency",
+              isRepeatable: false,
+            },
+          ],
+          args: {
+            name: "packages",
+            description:
+              "Package(s) to add (e.g., npm:react, npm:@types/react@19)",
+            isVariadic: true,
+          },
+        },
+        {
+          name: "install",
+          description: "Install all project dependencies",
+          options: [
+            {
+              name: "--explain",
+              description:
+                "Show why a provider is fresh or stale (requires a provider argument)",
+              isRepeatable: false,
+            },
+            {
+              name: ["-f", "--force"],
+              description: "Force run all deps steps even if outputs are fresh",
+              isRepeatable: false,
+            },
+            {
+              name: ["-n", "--dry-run"],
+              description:
+                "Only check if deps install is needed, don't run commands",
+              isRepeatable: false,
+            },
+            {
+              name: "--list",
+              description: "Show what deps providers are available",
+              isRepeatable: false,
+            },
+            {
+              name: "--only",
+              description: "Run specific deps rule(s) only",
+              isRepeatable: true,
+              args: {
+                name: "only",
+              },
+            },
+            {
+              name: "--skip",
+              description: "Skip specific deps rule(s)",
+              isRepeatable: true,
+              args: {
+                name: "skip",
+              },
+            },
+          ],
+          args: {
+            name: "provider",
+            description:
+              "Provider to operate on (runs only this provider, or use with --explain)",
+            isOptional: true,
+          },
+        },
+        {
+          name: "remove",
+          description: "Remove a dependency",
+          args: {
+            name: "packages",
+            description: "Package(s) to remove (e.g., npm:lodash)",
+            isVariadic: true,
+          },
+        },
+      ],
       options: [
         {
-          name: ["-f", "--force"],
-          description: "Force run all prepare steps even if outputs are fresh",
+          name: "--explain",
+          description:
+            "Show why a provider is fresh or stale (requires a provider argument)",
           isRepeatable: false,
         },
         {
-          name: "--list",
-          description: "Show what prepare steps are available",
+          name: ["-f", "--force"],
+          description: "Force run all deps steps even if outputs are fresh",
           isRepeatable: false,
         },
         {
           name: ["-n", "--dry-run"],
-          description: "Only check if prepare is needed, don't run commands",
+          description:
+            "Only check if deps install is needed, don't run commands",
+          isRepeatable: false,
+        },
+        {
+          name: "--list",
+          description: "Show what deps providers are available",
           isRepeatable: false,
         },
         {
           name: "--only",
-          description: "Run specific prepare rule(s) only",
+          description: "Run specific deps rule(s) only",
           isRepeatable: true,
           args: {
             name: "only",
@@ -1910,13 +2401,19 @@ const completionSpec: Fig.Spec = {
         },
         {
           name: "--skip",
-          description: "Skip specific prepare rule(s)",
+          description: "Skip specific deps rule(s)",
           isRepeatable: true,
           args: {
             name: "skip",
           },
         },
       ],
+      args: {
+        name: "provider",
+        description:
+          "Provider to operate on (runs only this provider, or use with --explain)",
+        isOptional: true,
+      },
     },
     {
       name: "prune",
@@ -1978,6 +2475,12 @@ const completionSpec: Fig.Spec = {
         {
           name: ["-J", "--json"],
           description: "Output in JSON format",
+          isRepeatable: false,
+        },
+        {
+          name: "--security",
+          description:
+            "Include security features for each tool's backends in JSON output",
           isRepeatable: false,
         },
       ],
@@ -2081,6 +2584,72 @@ const completionSpec: Fig.Spec = {
           },
         },
         {
+          name: "--allow-env",
+          description:
+            "[experimental] Allow specific env var through (implies --deny-env for everything else)\nSupports wildcards, e.g. --allow-env='MYAPP_*'",
+          isRepeatable: true,
+          args: {
+            name: "var",
+          },
+        },
+        {
+          name: "--allow-net",
+          description:
+            "[experimental] Allow network to specific host (implies --deny-net for everything else)",
+          isRepeatable: true,
+          args: {
+            name: "host",
+          },
+        },
+        {
+          name: "--allow-read",
+          description:
+            "[experimental] Allow reads from specific path (implies --deny-read for everything else)",
+          isRepeatable: true,
+          args: {
+            name: "path",
+            template: "filepaths",
+          },
+        },
+        {
+          name: "--allow-write",
+          description:
+            "[experimental] Allow writes to specific path (implies --deny-write for everything else)",
+          isRepeatable: true,
+          args: {
+            name: "path",
+            template: "filepaths",
+          },
+        },
+        {
+          name: "--deny-all",
+          description:
+            "[experimental] Block reads, writes, network, and env vars",
+          isRepeatable: false,
+        },
+        {
+          name: "--deny-env",
+          description:
+            "[experimental] Block env var inheritance (only PATH, HOME, USER, SHELL, TERM, LANG pass through)",
+          isRepeatable: false,
+        },
+        {
+          name: "--deny-net",
+          description: "[experimental] Block all network access",
+          isRepeatable: false,
+        },
+        {
+          name: "--deny-read",
+          description:
+            "[experimental] Block filesystem reads (system libs and tool dirs still accessible)",
+          isRepeatable: false,
+        },
+        {
+          name: "--deny-write",
+          description: "[experimental] Block all filesystem writes",
+          isRepeatable: false,
+        },
+        {
           name: "--fresh-env",
           description:
             "Bypass the environment cache and recompute the environment",
@@ -2092,7 +2661,7 @@ const completionSpec: Fig.Spec = {
           isRepeatable: false,
         },
         {
-          name: "--no-prepare",
+          name: "--no-deps",
           description: "Skip automatic dependency preparation",
           isRepeatable: false,
         },
@@ -2104,6 +2673,11 @@ const completionSpec: Fig.Spec = {
         {
           name: "--skip-deps",
           description: "Run only the specified tasks skipping all dependencies",
+          isRepeatable: false,
+        },
+        {
+          name: "--skip-tools",
+          description: "Skip installing tools before running tasks",
           isRepeatable: false,
         },
         {
@@ -2234,6 +2808,11 @@ const completionSpec: Fig.Spec = {
             name: "file",
             template: "filepaths",
           },
+        },
+        {
+          name: "--no-redact",
+          description: "Show raw values instead of redacting secrets",
+          isRepeatable: false,
         },
         {
           name: "--prompt",
@@ -2808,6 +3387,12 @@ const completionSpec: Fig.Spec = {
               isRepeatable: false,
             },
             {
+              name: "--name-only",
+              description:
+                "Only show task names, one per line. Useful for piping to fzf and similar tools.",
+              isRepeatable: false,
+            },
+            {
               name: "--no-header",
               description: "Do not print table header",
               isRepeatable: false,
@@ -2916,6 +3501,72 @@ const completionSpec: Fig.Spec = {
               },
             },
             {
+              name: "--allow-env",
+              description:
+                "[experimental] Allow specific env var through (implies --deny-env for everything else)\nSupports wildcards, e.g. --allow-env='MYAPP_*'",
+              isRepeatable: true,
+              args: {
+                name: "var",
+              },
+            },
+            {
+              name: "--allow-net",
+              description:
+                "[experimental] Allow network to specific host (implies --deny-net for everything else)",
+              isRepeatable: true,
+              args: {
+                name: "host",
+              },
+            },
+            {
+              name: "--allow-read",
+              description:
+                "[experimental] Allow reads from specific path (implies --deny-read for everything else)",
+              isRepeatable: true,
+              args: {
+                name: "path",
+                template: "filepaths",
+              },
+            },
+            {
+              name: "--allow-write",
+              description:
+                "[experimental] Allow writes to specific path (implies --deny-write for everything else)",
+              isRepeatable: true,
+              args: {
+                name: "path",
+                template: "filepaths",
+              },
+            },
+            {
+              name: "--deny-all",
+              description:
+                "[experimental] Block reads, writes, network, and env vars",
+              isRepeatable: false,
+            },
+            {
+              name: "--deny-env",
+              description:
+                "[experimental] Block env var inheritance (only PATH, HOME, USER, SHELL, TERM, LANG pass through)",
+              isRepeatable: false,
+            },
+            {
+              name: "--deny-net",
+              description: "[experimental] Block all network access",
+              isRepeatable: false,
+            },
+            {
+              name: "--deny-read",
+              description:
+                "[experimental] Block filesystem reads (system libs and tool dirs still accessible)",
+              isRepeatable: false,
+            },
+            {
+              name: "--deny-write",
+              description: "[experimental] Block all filesystem writes",
+              isRepeatable: false,
+            },
+            {
               name: "--fresh-env",
               description:
                 "Bypass the environment cache and recompute the environment",
@@ -2927,7 +3578,7 @@ const completionSpec: Fig.Spec = {
               isRepeatable: false,
             },
             {
-              name: "--no-prepare",
+              name: "--no-deps",
               description: "Skip automatic dependency preparation",
               isRepeatable: false,
             },
@@ -2940,6 +3591,11 @@ const completionSpec: Fig.Spec = {
               name: "--skip-deps",
               description:
                 "Run only the specified tasks skipping all dependencies",
+              isRepeatable: false,
+            },
+            {
+              name: "--skip-tools",
+              description: "Skip installing tools before running tasks",
               isRepeatable: false,
             },
             {
@@ -3030,6 +3686,12 @@ const completionSpec: Fig.Spec = {
           isRepeatable: false,
         },
         {
+          name: "--name-only",
+          description:
+            "Only show task names, one per line. Useful for piping to fzf and similar tools.",
+          isRepeatable: false,
+        },
+        {
           name: "--no-header",
           description: "Do not print table header",
           isRepeatable: false,
@@ -3072,7 +3734,7 @@ const completionSpec: Fig.Spec = {
         },
         {
           name: ["-j", "--jobs"],
-          description: "Number of jobs to run in parallel\n[default: 4]",
+          description: "Number of tool tests to run in parallel\n[default: 4]",
           isRepeatable: false,
           args: {
             name: "jobs",
@@ -3102,6 +3764,71 @@ const completionSpec: Fig.Spec = {
         isOptional: true,
         isVariadic: true,
       },
+    },
+    {
+      name: "token",
+      description: "Display git provider tokens mise will use",
+      subcommands: [
+        {
+          name: "forgejo",
+          description: "Forgejo token",
+          options: [
+            {
+              name: "--unmask",
+              description: "Show the full unmasked token",
+              isRepeatable: false,
+            },
+          ],
+          args: {
+            name: "host",
+            description: "Forgejo hostname",
+            isOptional: true,
+          },
+        },
+        {
+          name: "github",
+          description: "GitHub token",
+          options: [
+            {
+              name: "--oauth",
+              description:
+                "[experimental] Resolve only via the native GitHub OAuth source (cache, refresh, or device-code flow), bypassing other token sources",
+              isRepeatable: false,
+            },
+            {
+              name: "--raw",
+              description: "Print only the token value",
+              isRepeatable: false,
+            },
+            {
+              name: "--unmask",
+              description: "Show the full unmasked token",
+              isRepeatable: false,
+            },
+          ],
+          args: {
+            name: "host",
+            description: "GitHub hostname",
+            isOptional: true,
+          },
+        },
+        {
+          name: "gitlab",
+          description: "GitLab token",
+          options: [
+            {
+              name: "--unmask",
+              description: "Show the full unmasked token",
+              isRepeatable: false,
+            },
+          ],
+          args: {
+            name: "host",
+            description: "GitLab hostname",
+            isOptional: true,
+          },
+        },
+      ],
     },
     {
       name: "tool",
@@ -3267,6 +3994,18 @@ const completionSpec: Fig.Spec = {
       },
     },
     {
+      name: "untrust",
+      description: "No longer trust a config, will prompt in the future",
+      args: {
+        name: "config_file",
+        description: "The config file to untrust",
+        isOptional: true,
+        template: "filepaths",
+        generators: configPathGenerator,
+        debounce: true,
+      },
+    },
+    {
       name: ["unuse", "rm", "remove"],
       description: "Removes installed tool versions from mise.toml",
       options: [
@@ -3361,6 +4100,17 @@ const completionSpec: Fig.Spec = {
           name: "--dry-run-code",
           description:
             "Like --dry-run but exits with code 1 if there are outdated tools",
+          isRepeatable: false,
+        },
+        {
+          name: "--inactive",
+          description:
+            "Upgrade all tools, including installed-but-inactive tools not present in the current config",
+          isRepeatable: false,
+        },
+        {
+          name: "--local",
+          description: "Only upgrade tools defined in local config files",
           isRepeatable: false,
         },
         {

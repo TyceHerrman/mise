@@ -38,14 +38,37 @@ impl Platform {
         }
     }
 
-    /// Get the current platform from system information
+    /// Get the current platform from system information.
+    /// On Linux, detects musl vs glibc at runtime and sets the qualifier accordingly.
     pub fn current() -> Self {
         let settings = Settings::get();
+        let os = settings.os().to_string();
+        let qualifier = if os == "linux" {
+            match settings.libc() {
+                Some("musl") => Some("musl".to_string()),
+                Some("gnu") => None,
+                _ if is_musl_system() => Some("musl".to_string()),
+                _ => None,
+            }
+        } else {
+            None
+        };
         Platform {
-            os: settings.os().to_string(),
+            os,
             arch: settings.arch().to_string(),
-            qualifier: None,
+            qualifier,
         }
+    }
+
+    pub fn libc(&self) -> Option<&str> {
+        self.qualifier
+            .as_deref()?
+            .split('-')
+            .find_map(|part| match part {
+                "gnu" | "glibc" => Some("gnu"),
+                "musl" => Some("musl"),
+                _ => None,
+            })
     }
 
     /// Validate that this platform is supported
@@ -71,9 +94,9 @@ impl Platform {
         // Validate qualifier if present
         if let Some(qualifier) = &self.qualifier {
             match qualifier.as_str() {
-                "gnu" | "musl" | "msvc" | "baseline" | "musl-baseline" => {}
+                "gnu" | "glibc" | "musl" | "msvc" | "baseline" | "musl-baseline" => {}
                 _ => bail!(
-                    "Unsupported qualifier '{}'. Supported: gnu, musl, msvc, baseline, musl-baseline",
+                    "Unsupported qualifier '{}'. Supported: gnu, glibc, musl, msvc, baseline, musl-baseline",
                     qualifier
                 ),
             }
@@ -117,7 +140,9 @@ impl Platform {
     pub fn common_platforms() -> Vec<Self> {
         vec![
             Platform::parse("linux-x64").unwrap(),
+            Platform::parse("linux-x64-musl").unwrap(),
             Platform::parse("linux-arm64").unwrap(),
+            Platform::parse("linux-arm64-musl").unwrap(),
             Platform::parse("macos-x64").unwrap(),
             Platform::parse("macos-arm64").unwrap(),
             Platform::parse("windows-x64").unwrap(),
@@ -174,6 +199,51 @@ impl From<&str> for Platform {
     }
 }
 
+/// Detect whether the system uses musl libc at runtime.
+/// Checks for the absence of glibc's dynamic linker (`ld-linux-*`) in /lib and /lib64.
+/// On glibc systems, `ld-linux-*` is always present (even if musl-tools is installed
+/// for cross-compilation, which also places `ld-musl-*` in /lib). On musl-only systems
+/// (Alpine, Void musl, etc.), only `ld-musl-*` exists without `ld-linux-*`.
+// NOTE: This logic is mirrored in crates/vfox/src/config.rs env_type(). Keep in sync.
+#[cfg(target_os = "linux")]
+fn is_musl_system() -> bool {
+    use std::sync::LazyLock;
+    static IS_MUSL: LazyLock<bool> = LazyLock::new(|| {
+        // If glibc's dynamic linker exists, this is a glibc system
+        for dir in ["/lib", "/lib64"] {
+            if has_file_prefix(dir, "ld-linux-") {
+                return false;
+            }
+        }
+        // No glibc linker found — check for musl's
+        for dir in ["/lib", "/lib64"] {
+            if has_file_prefix(dir, "ld-musl-") {
+                return true;
+            }
+        }
+        // No linker found at all (e.g., scratch/busybox container) —
+        // fall back to the binary's compile-time target
+        cfg!(target_env = "musl")
+    });
+    *IS_MUSL
+}
+
+#[cfg(target_os = "linux")]
+fn has_file_prefix(dir: &str, prefix: &str) -> bool {
+    std::fs::read_dir(dir)
+        .map(|entries| {
+            entries
+                .flatten()
+                .any(|e| e.file_name().to_string_lossy().starts_with(prefix))
+        })
+        .unwrap_or(false)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn is_musl_system() -> bool {
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -221,6 +291,12 @@ mod tests {
         assert!(Platform::parse("macos-arm64").unwrap().validate().is_ok());
         assert!(Platform::parse("windows-x64").unwrap().validate().is_ok());
         assert!(Platform::parse("linux-x64-gnu").unwrap().validate().is_ok());
+        assert!(
+            Platform::parse("linux-x64-glibc")
+                .unwrap()
+                .validate()
+                .is_ok()
+        );
 
         // Invalid OS
         assert!(Platform::parse("invalid-x64").unwrap().validate().is_err());
@@ -283,13 +359,40 @@ mod tests {
     #[test]
     fn test_common_platforms() {
         let platforms = Platform::common_platforms();
-        assert_eq!(platforms.len(), 5);
+        assert_eq!(platforms.len(), 7);
 
         let keys: Vec<String> = platforms.iter().map(|p| p.to_key()).collect();
         assert!(keys.contains(&"linux-x64".to_string()));
+        assert!(keys.contains(&"linux-x64-musl".to_string()));
         assert!(keys.contains(&"linux-arm64".to_string()));
+        assert!(keys.contains(&"linux-arm64-musl".to_string()));
         assert!(keys.contains(&"macos-x64".to_string()));
         assert!(keys.contains(&"macos-arm64".to_string()));
         assert!(keys.contains(&"windows-x64".to_string()));
+    }
+
+    #[cfg(all(target_os = "linux", target_env = "musl"))]
+    #[test]
+    fn test_musl_binary_detects_musl() {
+        // A musl-compiled binary should always detect musl, even in
+        // minimal containers with no linker files (scratch, busybox).
+        assert!(
+            is_musl_system(),
+            "musl-compiled binary should detect musl system"
+        );
+    }
+
+    #[cfg(all(target_os = "linux", target_env = "musl"))]
+    #[test]
+    fn test_current_platform_has_musl_qualifier() {
+        // A musl-compiled binary should always have the musl qualifier,
+        // even in minimal containers with no linker files.
+        let platform = Platform::current();
+        assert_eq!(
+            platform.qualifier.as_deref(),
+            Some("musl"),
+            "musl-compiled binary should have musl qualifier, got: {}",
+            platform.to_key()
+        );
     }
 }

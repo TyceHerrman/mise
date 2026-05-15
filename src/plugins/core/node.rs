@@ -1,21 +1,25 @@
 use crate::backend::VersionInfo;
 use crate::backend::static_helpers::fetch_checksum_from_shasums;
-use crate::backend::{Backend, VersionCacheManager, platform_target::PlatformTarget};
+use crate::backend::{
+    Backend, VersionCacheManager, normalize_idiomatic_contents, platform_target::PlatformTarget,
+};
 use crate::build_time::built_info;
 use crate::cache::CacheManagerBuilder;
 use crate::cli::args::BackendArg;
 use crate::cmd::CmdLineRunner;
+use crate::config::settings::DEFAULT_NODE_MIRROR_URL;
 use crate::config::{Config, Settings};
 use crate::file::{TarFormat, TarOptions};
 use crate::http::{HTTP, HTTP_FETCH};
 use crate::install_context::InstallContext;
 use crate::lockfile::PlatformInfo;
+use crate::platform::Platform;
 use crate::toolset::{ToolRequest, ToolVersion};
 use crate::ui::progress_report::SingleReport;
 use crate::{env, file, gpg, hash, http, plugins};
 use async_trait::async_trait;
 use eyre::{Result, bail, ensure};
-use serde_derive::Deserialize;
+use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -113,10 +117,9 @@ impl NodePlugin {
                     &opts.binary_tarball_path,
                     &opts.install_path,
                     &TarOptions {
-                        format: TarFormat::TarGz,
                         strip_components: 1,
                         pr: Some(ctx.pr.as_ref()),
-                        ..Default::default()
+                        ..TarOptions::new(TarFormat::TarGz)
                     },
                 )?;
                 Ok(())
@@ -157,15 +160,27 @@ impl NodePlugin {
     ) -> Result<()> {
         debug!("{:?}: we will fetch the source and compile", self);
         let tarball_name = &opts.source_tarball_name;
-        self.fetch_tarball(
-            ctx,
-            tv,
-            ctx.pr.as_ref(),
-            &opts.source_tarball_url,
-            &opts.source_tarball_path,
-            &opts.version,
-        )
-        .await?;
+        if let Err(err) = self
+            .fetch_tarball(
+                ctx,
+                tv,
+                ctx.pr.as_ref(),
+                &opts.source_tarball_url,
+                &opts.source_tarball_path,
+                &opts.version,
+            )
+            .await
+        {
+            if let Some(reqwest_err) = err.root_cause().downcast_ref::<reqwest::Error>()
+                && reqwest_err.status() == Some(reqwest::StatusCode::NOT_FOUND)
+                && let Ok(Some(msg)) = self
+                    .suggest_available_flavors(&opts.version, &Settings::get())
+                    .await
+            {
+                return Err(eyre::eyre!("{err}\n{msg}"));
+            }
+            return Err(err);
+        }
         ctx.pr.next_operation();
         ctx.pr.set_message(format!("extract {tarball_name}"));
         file::remove_all(&opts.build_dir)?;
@@ -173,9 +188,8 @@ impl NodePlugin {
             &opts.source_tarball_path,
             opts.build_dir.parent().unwrap(),
             &TarOptions {
-                format: TarFormat::TarGz,
                 pr: Some(ctx.pr.as_ref()),
-                ..Default::default()
+                ..TarOptions::new(TarFormat::TarGz)
             },
         )?;
         self.exec_configure(ctx, opts)?;
@@ -193,6 +207,7 @@ impl NodePlugin {
         local: &Path,
         version: &str,
     ) -> Result<()> {
+        let settings = Settings::get();
         let tarball_name = local.file_name().unwrap().to_string_lossy().to_string();
         if local.exists() {
             pr.set_message(format!("using previously downloaded {tarball_name}"));
@@ -206,7 +221,7 @@ impl NodePlugin {
             .entry(self.get_platform_key())
             .or_default();
         platform_info.url = Some(url.to_string());
-        if *env::MISE_NODE_VERIFY && platform_info.checksum.is_none() {
+        if settings.node.verify && platform_info.checksum.is_none() {
             platform_info.checksum = Some(self.get_checksum(ctx, local, version).await?);
         }
         self.verify_checksum(ctx, tv, local)?;
@@ -214,12 +229,13 @@ impl NodePlugin {
     }
 
     fn sh<'a>(&self, ctx: &'a InstallContext, opts: &BuildOpts) -> eyre::Result<CmdLineRunner<'a>> {
+        let settings = Settings::get();
         let mut cmd = CmdLineRunner::new("sh")
             .prepend_path(opts.path.clone())?
             .with_pr(ctx.pr.as_ref())
             .current_dir(&opts.build_dir)
             .arg("-c");
-        if let Some(cflags) = &*env::MISE_NODE_CFLAGS {
+        if let Some(cflags) = settings.node.cflags() {
             cmd = cmd.env("CFLAGS", cflags);
         }
         Ok(cmd)
@@ -244,13 +260,14 @@ impl NodePlugin {
         let tarball_name = tarball.file_name().unwrap().to_string_lossy().to_string();
         let shasums_file = tarball.parent().unwrap().join("SHASUMS256.txt");
         HTTP.download_file(
-            self.shasums_url(version)?,
+            self.shasums_url(version, &tarball_name)?,
             &shasums_file,
             Some(ctx.pr.as_ref()),
         )
         .await?;
         if Settings::get().node.gpg_verify != Some(false) && version.starts_with("2") {
-            self.verify_with_gpg(ctx, &shasums_file, version).await?;
+            self.verify_with_gpg(ctx, &shasums_file, version, &tarball_name)
+                .await?;
         }
         let shasums = file::read_to_string(&shasums_file)?;
         let shasums = hash::parse_shasums(&shasums);
@@ -263,13 +280,14 @@ impl NodePlugin {
         ctx: &InstallContext,
         shasums_file: &Path,
         v: &str,
+        tarball_name: &str,
     ) -> Result<()> {
         if file::which_non_pristine("gpg").is_none() && Settings::get().node.gpg_verify.is_none() {
             warn!("gpg not found, skipping verification");
             return Ok(());
         }
         let sig_file = shasums_file.with_extension("asc");
-        let sig_url = format!("{}.sig", self.shasums_url(v)?);
+        let sig_url = format!("{}.sig", self.shasums_url(v, tarball_name)?);
         if let Err(e) = HTTP
             .download_file(sig_url, &sig_file, Some(ctx.pr.as_ref()))
             .await
@@ -323,7 +341,9 @@ impl NodePlugin {
         tv: &ToolVersion,
         pr: &dyn SingleReport,
     ) -> Result<()> {
-        let body = file::read_to_string(&*env::MISE_NODE_DEFAULT_PACKAGES_FILE).unwrap_or_default();
+        let settings = Settings::get();
+        let default_packages_file = file::replace_path(settings.node.default_packages_file());
+        let body = file::read_to_string(&default_packages_file).unwrap_or_default();
         for package in body.lines() {
             let package = package.split('#').next().unwrap_or_default().trim();
             if package.is_empty() {
@@ -390,14 +410,70 @@ impl NodePlugin {
             .execute()
     }
 
-    fn shasums_url(&self, v: &str) -> Result<Url> {
+    fn shasums_url(&self, v: &str, tarball_name: &str) -> Result<Url> {
         // let url = MISE_NODE_MIRROR_URL.join(&format!("v{v}/SHASUMS256.txt.asc"))?;
         let settings = Settings::get();
-        let url = settings
-            .node
-            .mirror_url()
-            .join(&format!("v{v}/SHASUMS256.txt"))?;
+        let url =
+            mirror_url_for(&settings.node, tarball_name).join(&format!("v{v}/SHASUMS256.txt"))?;
         Ok(url)
+    }
+
+    async fn suggest_available_flavors(
+        &self,
+        v: &str,
+        settings: &Settings,
+    ) -> Result<Option<String>> {
+        let base = settings.node.mirror_url();
+        // If using default mirror, we don't need to suggest anything as it's likely a real 404
+        if base.to_string() == DEFAULT_NODE_MIRROR_URL {
+            return Ok(None);
+        }
+
+        let versions: Vec<NodeVersion> = HTTP_FETCH
+            .json(base.join("index.json")?)
+            .await
+            .unwrap_or_default();
+
+        if let Some(version) = versions.iter().find(|nv| {
+            nv.version == format!("v{v}") || nv.version == v || nv.version == format!("v{v}.")
+        }) {
+            let os = os();
+            let arch = arch(settings);
+            let candidates: Vec<&String> = version
+                .files
+                .iter()
+                .filter(|f| f.starts_with(&format!("{os}-{arch}-")))
+                .collect();
+
+            if !candidates.is_empty() {
+                let mut msg = format!("Could not find node@{v} with the current settings.\n");
+                msg.push_str(&format!(
+                    "However, the following flavors are available on the mirror for {os}-{arch}:\n"
+                ));
+                for candidate in candidates {
+                    // Extract flavor from "linux-x64-musl" -> "musl"
+                    // format is {os}-{arch}-{flavor}
+                    let prefix = format!("{os}-{arch}-");
+                    if let Some(flavor) = candidate.strip_prefix(&prefix) {
+                        msg.push_str(&format!("  - {flavor}\n"));
+                    } else {
+                        msg.push_str(&format!("  - {candidate} (unknown format)\n"));
+                    }
+                }
+                msg.push_str("\nYou can try setting the flavor using:\n");
+                msg.push_str("  mise settings set node.flavor <flavor>\n");
+                return Ok(Some(msg));
+            } else {
+                // Fallback: list all files for that version if no arch match
+                let mut msg = format!("Could not find node@{v} for {os}-{arch}.\n");
+                msg.push_str("Available files for this version on the mirror:\n");
+                for file in &version.files {
+                    msg.push_str(&format!("  - {file}\n"));
+                }
+                return Ok(Some(msg));
+            }
+        }
+        Ok(None)
     }
 }
 
@@ -424,7 +500,7 @@ impl Backend for NodePlugin {
 
     async fn _list_remote_versions(&self, _config: &Arc<Config>) -> Result<Vec<VersionInfo>> {
         let settings = Settings::get();
-        let base = Settings::get().node.mirror_url();
+        let base = settings.node.mirror_url();
         let versions = HTTP_FETCH
             .json::<Vec<NodeVersion>, _>(base.join("index.json")?)
             .await?
@@ -487,7 +563,7 @@ impl Backend for NodePlugin {
         Ok(aliases)
     }
 
-    async fn idiomatic_filenames(&self) -> Result<Vec<String>> {
+    async fn _idiomatic_filenames(&self) -> Result<Vec<String>> {
         Ok(vec![
             ".node-version".into(),
             ".nvmrc".into(),
@@ -495,21 +571,19 @@ impl Backend for NodePlugin {
         ])
     }
 
-    async fn parse_idiomatic_file(&self, path: &Path) -> Result<String> {
-        if path.file_name().is_some_and(|f| f == "package.json") {
-            let pkg = crate::package_json::PackageJson::parse(path)?;
-            return pkg
-                .runtime_version("node")
-                .ok_or_else(|| eyre::eyre!("no node version found in package.json"));
-        }
-        let body = file::read_to_string(path)?;
-        // strip comments
-        let body = body.split('#').next().unwrap_or_default().to_string();
-        // trim "v" prefix
-        let body = body.trim().strip_prefix('v').unwrap_or(&body);
-        // replace lts/* with lts
-        let body = body.replace("lts/*", "lts");
-        Ok(body)
+    async fn _parse_idiomatic_file(&self, path: &Path) -> Result<Vec<String>> {
+        let contents = file::read_to_string(path)?;
+        let body = normalize_idiomatic_contents(&contents);
+
+        let versions = body
+            .lines()
+            .map(|line| {
+                let mut version = line.trim().strip_prefix('v').unwrap_or(line).to_string();
+                version = version.replace("lts/*", "lts");
+                version
+            })
+            .collect();
+        Ok(versions)
     }
 
     async fn install_version_(
@@ -544,7 +618,7 @@ impl Backend for NodePlugin {
         {
             warn!("failed to install default npm packages: {err:#}");
         }
-        if *env::MISE_NODE_COREPACK && self.corepack_path(&tv).exists() {
+        if settings.node.corepack && self.corepack_path(&tv).exists() {
             self.enable_default_corepack_shims(&tv, ctx.pr.as_ref())?;
         }
 
@@ -564,13 +638,14 @@ impl Backend for NodePlugin {
         static CACHE: OnceLock<Arc<Mutex<VersionCacheManager>>> = OnceLock::new();
         CACHE
             .get_or_init(|| {
+                let settings = Settings::get();
                 Mutex::new(
                     CacheManagerBuilder::new(
                         self.ba().cache_path.join("remote_versions.msgpack.z"),
                     )
-                    .with_fresh_duration(Settings::get().fetch_remote_versions_cache())
-                    .with_cache_key(Settings::get().node.mirror_url.clone().unwrap_or_default())
-                    .with_cache_key(Settings::get().node.flavor.clone().unwrap_or_default())
+                    .with_fresh_duration(settings.fetch_remote_versions_cache())
+                    .with_cache_key(settings.node.mirror_url.clone().unwrap_or_default())
+                    .with_cache_key(settings.node.flavor.clone().unwrap_or_default())
                     .build(),
                 )
                 .into()
@@ -596,10 +671,9 @@ impl Backend for NodePlugin {
             format!("{slug}.tar.gz")
         };
 
-        // Use Node.js mirror URL to construct download URL
-        let url = settings
-            .node
-            .mirror_url()
+        // Use Node.js mirror URL to construct download URL.
+        // Musl tarballs live on unofficial-builds, not nodejs.org/dist.
+        let url = mirror_url_for(&settings.node, &filename)
             .join(&format!("v{version}/{filename}"))
             .map_err(|e| eyre::eyre!("Failed to construct Node.js download URL: {e}"))?;
 
@@ -625,8 +699,9 @@ impl Backend for NodePlugin {
             opts.insert("compile".to_string(), "true".to_string());
         }
 
-        // Flavor affects which binary variant is downloaded (only if set)
-        if is_current_platform && let Some(flavor) = settings.node.flavor.clone() {
+        // Flavor affects which binary variant is downloaded
+        // Apply to all platforms to avoid splitting lockfile entries (#8390)
+        if let Some(flavor) = settings.node.flavor.clone() {
             opts.insert("flavor".to_string(), flavor);
         }
 
@@ -649,18 +724,16 @@ impl Backend for NodePlugin {
             format!("{slug}.tar.gz")
         };
 
-        // Build download URL
-        let url = settings
-            .node
-            .mirror_url()
+        // Build download URL. Musl tarballs live on unofficial-builds; pick the
+        // mirror once and use it for both the tarball URL and SHASUMS so the
+        // recorded checksum matches the recorded URL.
+        let mirror = mirror_url_for(&settings.node, &filename);
+        let url = mirror
             .join(&format!("v{version}/{filename}"))
             .map_err(|e| eyre::eyre!("Failed to construct Node.js download URL: {e}"))?;
 
         // Fetch SHASUMS256.txt to get checksum without downloading the tarball
-        let shasums_url = settings
-            .node
-            .mirror_url()
-            .join(&format!("v{version}/SHASUMS256.txt"))?;
+        let shasums_url = mirror.join(&format!("v{version}/SHASUMS256.txt"))?;
         let checksum = fetch_checksum_from_shasums(shasums_url.as_str(), &filename).await;
 
         Ok(PlatformInfo {
@@ -669,6 +742,7 @@ impl Backend for NodePlugin {
             size: None,
             url_api: None,
             conda_deps: None,
+            ..Default::default()
         })
     }
 }
@@ -706,12 +780,18 @@ impl NodePlugin {
         let os = Self::map_os(target.os_name());
         let arch = Self::map_arch(target.arch_name());
 
-        // Flavor (like "glibc") only applies to the current Linux platform
-        // Don't apply it to non-current platforms during cross-platform locking
-        if target.is_current()
-            && target.os_name() == "linux"
-            && let Some(flavor) = &settings.node.flavor
-        {
+        // Only Linux has Node flavors. The node-specific flavor is for the
+        // current host; lock targets use their own libc qualifier.
+        let flavor = match (target.os_name(), target.is_current()) {
+            ("linux", true) => settings
+                .node
+                .flavor
+                .as_deref()
+                .or_else(|| target.libc().filter(|libc| *libc == "musl")),
+            ("linux", false) => target.libc().filter(|libc| *libc == "musl"),
+            _ => None,
+        };
+        if let Some(flavor) = flavor {
             return format!("node-v{version}-{os}-{arch}-{flavor}");
         }
         format!("node-v{version}-{os}-{arch}")
@@ -747,23 +827,22 @@ impl BuildOpts {
         #[cfg(not(windows))]
         let binary_tarball_name = format!("{slug}.tar.gz");
 
+        let settings = Settings::get();
         Ok(Self {
             version: v.clone(),
             path: ctx.ts.list_paths(&ctx.config).await,
             build_dir: env::MISE_TMP_DIR.join(format!("node-v{v}")),
-            configure_cmd: configure_cmd(&install_path),
-            make_cmd: make_cmd(),
-            make_install_cmd: make_install_cmd(),
+            configure_cmd: settings.node.configure_cmd(&install_path),
+            make_cmd: settings.node.make_cmd(),
+            make_install_cmd: settings.node.make_install_cmd(),
             source_tarball_path: tv.download_path().join(&source_tarball_name),
-            source_tarball_url: Settings::get()
+            source_tarball_url: settings
                 .node
                 .mirror_url()
                 .join(&format!("v{v}/{source_tarball_name}"))?,
             source_tarball_name,
             binary_tarball_path: tv.download_path().join(&binary_tarball_name),
-            binary_tarball_url: Settings::get()
-                .node
-                .mirror_url()
+            binary_tarball_url: mirror_url_for(&settings.node, &binary_tarball_name)
                 .join(&format!("v{v}/{binary_tarball_name}"))?,
             binary_tarball_name,
             install_path,
@@ -771,34 +850,18 @@ impl BuildOpts {
     }
 }
 
-fn configure_cmd(install_path: &Path) -> String {
-    let mut configure_cmd = format!("./configure --prefix={}", install_path.display());
-    if *env::MISE_NODE_NINJA {
-        configure_cmd.push_str(" --ninja");
-    }
-    if let Some(opts) = &*env::MISE_NODE_CONFIGURE_OPTS {
-        configure_cmd.push_str(&format!(" {opts}"));
-    }
-    configure_cmd
-}
+/// `nodejs.org/dist` does not host musl tarballs; they live at unofficial-builds.
+/// When a filename references a musl artifact and the user has not explicitly set
+/// `node.mirror_url`, route URL construction (and the matching `SHASUMS256.txt`)
+/// to the unofficial-builds host so the URL and checksum stay consistent.
+const UNOFFICIAL_NODE_MIRROR_URL: &str = "https://unofficial-builds.nodejs.org/download/release/";
 
-fn make_cmd() -> String {
-    let mut make_cmd = env::MISE_NODE_MAKE.to_string();
-    if let Some(concurrency) = *env::MISE_NODE_CONCURRENCY {
-        make_cmd.push_str(&format!(" -j{concurrency}"));
+fn mirror_url_for(node: &crate::config::settings::SettingsNode, filename: &str) -> Url {
+    let mirror = node.mirror_url();
+    if filename.contains("-musl") && mirror.as_str() == DEFAULT_NODE_MIRROR_URL {
+        return Url::parse(UNOFFICIAL_NODE_MIRROR_URL).unwrap();
     }
-    if let Some(opts) = &*env::MISE_NODE_MAKE_OPTS {
-        make_cmd.push_str(&format!(" {opts}"));
-    }
-    make_cmd
-}
-
-fn make_install_cmd() -> String {
-    let mut make_install_cmd = format!("{} install", &*env::MISE_NODE_MAKE);
-    if let Some(opts) = &*env::MISE_NODE_MAKE_INSTALL_OPTS {
-        make_install_cmd.push_str(&format!(" {opts}"));
-    }
-    make_install_cmd
+    mirror
 }
 
 fn os() -> &'static str {
@@ -816,7 +879,17 @@ fn arch(settings: &Settings) -> &str {
 
 fn slug(v: &str) -> String {
     let settings = Settings::get();
-    if let Some(flavor) = &settings.node.flavor {
+    let current = Platform::current();
+    let flavor = if current.os == "linux" {
+        settings
+            .node
+            .flavor
+            .as_deref()
+            .or_else(|| current.libc().filter(|libc| *libc == "musl"))
+    } else {
+        None
+    };
+    if let Some(flavor) = flavor {
         format!("node-v{v}-{}-{}-{flavor}", os(), arch(&settings))
     } else {
         format!("node-v{v}-{}-{}", os(), arch(&settings))
@@ -828,4 +901,38 @@ struct NodeVersion {
     version: String,
     date: Option<String>,
     files: Vec<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::settings::SettingsNode;
+
+    #[test]
+    fn test_mirror_url_for_routes_musl_to_unofficial_builds() {
+        let node = SettingsNode::default();
+        let url = mirror_url_for(&node, "node-v24.14.0-linux-x64-musl.tar.gz");
+        assert_eq!(url.as_str(), UNOFFICIAL_NODE_MIRROR_URL);
+    }
+
+    #[test]
+    fn test_mirror_url_for_keeps_default_for_glibc() {
+        let node = SettingsNode::default();
+        let url = mirror_url_for(&node, "node-v24.14.0-linux-x64.tar.gz");
+        assert_eq!(url.as_str(), DEFAULT_NODE_MIRROR_URL);
+    }
+
+    #[test]
+    fn test_mirror_url_for_respects_explicit_mirror() {
+        // If the user has a custom mirror, route everything through it —
+        // they may be using a corporate mirror that does host musl builds.
+        let node = SettingsNode {
+            mirror_url: Some("https://corp.example/node/".to_string()),
+            ..Default::default()
+        };
+        let glibc = mirror_url_for(&node, "node-v24.14.0-linux-x64.tar.gz");
+        let musl = mirror_url_for(&node, "node-v24.14.0-linux-x64-musl.tar.gz");
+        assert_eq!(glibc.as_str(), "https://corp.example/node/");
+        assert_eq!(musl.as_str(), "https://corp.example/node/");
+    }
 }

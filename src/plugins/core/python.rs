@@ -1,14 +1,17 @@
 use crate::backend::platform_target::PlatformTarget;
+use crate::backend::static_helpers::fetch_checksum_from_shasums;
 use crate::backend::{Backend, VersionCacheManager, VersionInfo};
 use crate::build_time::built_info;
 use crate::cache::{CacheManager, CacheManagerBuilder};
 use crate::cli::args::BackendArg;
 use crate::cmd::CmdLineRunner;
 use crate::config::{Config, Settings};
-use crate::file::{TarOptions, display_path};
+use crate::file::{TarFormat, TarOptions, display_path};
 use crate::git::{CloneOptions, Git};
 use crate::http::{HTTP, HTTP_FETCH};
 use crate::install_context::InstallContext;
+use crate::lockfile::{PlatformInfo, ProvenanceType};
+use crate::platform::Platform;
 use crate::toolset::{ToolRequest, ToolVersion, Toolset};
 use crate::ui::progress_report::SingleReport;
 use crate::{Result, lock_file::LockFile};
@@ -25,6 +28,9 @@ use std::sync::{Arc, OnceLock};
 use tokio::sync::Mutex;
 use versions::Versioning;
 use xx::regex;
+
+const ATTESTATION_HELP: &str = "To disable attestation verification, set MISE_PYTHON_GITHUB_ATTESTATIONS=false\n\
+    or add `python.github_attestations = false` under [settings] in mise.toml";
 
 #[derive(Debug)]
 pub struct PythonPlugin {
@@ -175,12 +181,21 @@ impl PythonPlugin {
                 let mut raw = String::new();
                 decoder.read_to_string(&mut raw)?;
                 let platform = python_precompiled_platform();
+                let flavor = settings.python.precompiled_flavor.clone();
                 // order by version, whether it is a release candidate, date, and in the preferred order of install types
                 let rank = |v: &str, date: &str, name: &str| {
                     let rc = if regex!(r"rc\d+$").is_match(v) { 0 } else { 1 };
                     let v = Versioning::new(v);
                     let date = date.parse::<i64>().unwrap_or_default();
-                    let install_type = if name.contains("install_only_stripped") {
+                    let install_type = if let Some(ref flavor) = flavor {
+                        // When flavor is set, prefer exact match
+                        let name_without_ext = name.trim_end_matches(".tar.gz");
+                        if name_without_ext.ends_with(flavor.as_str()) {
+                            0
+                        } else {
+                            1
+                        }
+                    } else if name.contains("install_only_stripped") {
                         0
                     } else if name.contains("install_only") {
                         1
@@ -192,6 +207,7 @@ impl PythonPlugin {
                 let versions = raw
                     .lines()
                     .filter(|v| v.contains(&platform))
+                    .filter(|v| filter_freethreaded(v, &flavor))
                     .flat_map(|v| {
                         // cpython-3.9.5+20210525 or cpython-3.9.5rc3+20210525
                         regex!(r"^cpython-(\d+\.\d+\.[\da-z]+)\+(\d+).*")
@@ -216,56 +232,66 @@ impl PythonPlugin {
     async fn install_precompiled(
         &self,
         ctx: &InstallContext,
-        tv: &ToolVersion,
+        tv: &mut ToolVersion,
     ) -> eyre::Result<()> {
-        let precompiled_versions = self.fetch_precompiled_remote_versions().await?;
-        let precompile_info = precompiled_versions
-            .iter()
-            .rev()
-            .find(|(v, _, _)| &tv.version == v);
-        let (tag, filename) = match precompile_info {
-            Some((_, tag, filename)) => (tag, filename),
-            None => {
-                if cfg!(windows) || Settings::get().python.compile == Some(false) {
-                    if !cfg!(windows) {
-                        hint!(
-                            "python_compile",
-                            "To compile python from source, run",
-                            "mise settings python.compile=1"
+        let platform_key = self.get_platform_key();
+        let url = if let Some(url) = tv
+            .lock_platforms
+            .get(&platform_key)
+            .and_then(|pi| pi.url.clone())
+        {
+            debug!("using lockfile URL for platform {platform_key}: {url}");
+            url
+        } else {
+            let precompiled_versions = self.fetch_precompiled_remote_versions().await?;
+            let precompile_info = precompiled_versions
+                .iter()
+                .rev()
+                .find(|(v, _, _)| &tv.version == v);
+            let (tag, filename) = match precompile_info {
+                Some((_, tag, filename)) => (tag, filename),
+                None => {
+                    if cfg!(windows) || Settings::get().python.compile == Some(false) {
+                        if !cfg!(windows) {
+                            hint!(
+                                "python_compile",
+                                "To compile python from source, run",
+                                "mise settings python.compile=1"
+                            );
+                        }
+                        let platform = python_precompiled_platform();
+                        bail!("no precompiled python found for {tv} on {platform}");
+                    }
+                    let available = precompiled_versions.iter().map(|(v, _, _)| v).collect_vec();
+                    if available.is_empty() {
+                        debug!("no precompiled python found for {}", tv.version);
+                    } else {
+                        warn!(
+                            "no precompiled python found for {}, force mise to use a precompiled version with `mise settings set python.compile false`",
+                            tv.version
                         );
                     }
-                    let platform = python_precompiled_platform();
-                    bail!("no precompiled python found for {tv} on {platform}");
-                }
-                let available = precompiled_versions.iter().map(|(v, _, _)| v).collect_vec();
-                if available.is_empty() {
-                    debug!("no precompiled python found for {}", tv.version);
-                } else {
-                    warn!(
-                        "no precompiled python found for {}, force mise to use a precompiled version with `mise settings set python.compile false`",
-                        tv.version
+                    trace!(
+                        "available precompiled versions: {}",
+                        available.into_iter().join(", ")
                     );
+                    return self.install_compiled(ctx, tv).await;
                 }
-                trace!(
-                    "available precompiled versions: {}",
-                    available.into_iter().join(", ")
+            };
+
+            if cfg!(unix) {
+                hint!(
+                    "python_precompiled",
+                    "installing precompiled python from astral-sh/python-build-standalone\n\
+                    if you experience issues with this python (e.g.: running poetry), switch to python-build by running",
+                    "mise settings python.compile=1"
                 );
-                return self.install_compiled(ctx, tv).await;
             }
+
+            format!(
+                "https://github.com/astral-sh/python-build-standalone/releases/download/{tag}/{filename}"
+            )
         };
-
-        if cfg!(unix) {
-            hint!(
-                "python_precompiled",
-                "installing precompiled python from astral-sh/python-build-standalone\n\
-                if you experience issues with this python (e.g.: running poetry), switch to python-build by running",
-                "mise settings python.compile=1"
-            );
-        }
-
-        let url = format!(
-            "https://github.com/astral-sh/python-build-standalone/releases/download/{tag}/{filename}"
-        );
         let filename = url.split('/').next_back().unwrap();
         let install = tv.install_path();
         let download = tv.download_path();
@@ -275,6 +301,27 @@ impl PythonPlugin {
         HTTP.download_file(&url, &tarball_path, Some(ctx.pr.as_ref()))
             .await?;
 
+        // Record the URL in lock_platforms so verify_checksum can find it
+        tv.lock_platforms
+            .entry(platform_key.clone())
+            .or_default()
+            .url = Some(url.to_string());
+
+        // Check before verify_checksum, which may generate a new checksum from the
+        // downloaded file. We only skip provenance when the lockfile already had
+        // integrity data before this install.
+        let has_lockfile_integrity = Self::has_precompiled_lockfile_integrity(tv, &platform_key);
+
+        self.verify_checksum(ctx, tv, &tarball_path)?;
+
+        let settings = Settings::get();
+        if has_lockfile_integrity && !settings.force_provenance_verify() {
+            Self::ensure_precompiled_provenance_setting_enabled(tv, &platform_key)?;
+        } else {
+            self.verify_precompiled_provenance(ctx, tv, &platform_key, &tarball_path)
+                .await?;
+        }
+
         file::remove_all(&install)?;
         file::untar(
             &tarball_path,
@@ -282,7 +329,7 @@ impl PythonPlugin {
             &TarOptions {
                 strip_components: 1,
                 pr: Some(ctx.pr.as_ref()),
-                ..Default::default()
+                ..TarOptions::new(TarFormat::from_file_name(filename))
             },
         )?;
         if !install.join("bin").exists() {
@@ -307,7 +354,7 @@ impl PythonPlugin {
             .map(|s| re_digits.replace(s, "").to_string());
         if cfg!(unix) {
             if let (Some(major), Some(minor), Some(suffix)) = (major, minor, suffix) {
-                if tv.request.options().get("patch_sysconfig") != Some(&"false".to_string()) {
+                if tv.request.options().get("patch_sysconfig") != Some("false") {
                     sysconfig::update_sysconfig(&install, major, minor, &suffix)?;
                 }
             } else {
@@ -387,7 +434,6 @@ impl PythonPlugin {
         &self,
         config: &Arc<Config>,
         tv: &ToolVersion,
-        pr: Option<&dyn SingleReport>,
     ) -> eyre::Result<Option<PathBuf>> {
         if let Some(virtualenv) = tv.request.options().get("virtualenv") {
             if !Settings::get().experimental {
@@ -404,26 +450,13 @@ impl PythonPlugin {
                 }
             }
             if !virtualenv.exists() {
-                if Settings::get().python.venv_auto_create {
-                    info!("setting up virtualenv at: {}", virtualenv.display());
-                    let mut cmd = CmdLineRunner::new(python_path(tv))
-                        .arg("-m")
-                        .arg("venv")
-                        .arg(&virtualenv)
-                        .envs(config.env().await?);
-                    if let Some(pr) = pr {
-                        cmd = cmd.with_pr(pr);
-                    }
-                    cmd.execute()?;
-                } else {
-                    warn!(
-                        "no venv found at: {p}\n\n\
-                        To create a virtualenv manually, run:\n\
-                        python -m venv {p}",
-                        p = display_path(&virtualenv)
-                    );
-                    return Ok(None);
-                }
+                warn!(
+                    "no venv found at: {p}\n\n\
+                    To create a virtualenv manually, run:\n\
+                    python -m venv {p}",
+                    p = display_path(&virtualenv)
+                );
+                return Ok(None);
             }
             // TODO: enable when it is more reliable
             // self.check_venv_python(&virtualenv, tv)?;
@@ -460,6 +493,215 @@ impl PythonPlugin {
             .envs(config.env().await?)
             .execute()
     }
+
+    /// Fetch the best precompiled release for a specific version and platform target.
+    /// Unlike `fetch_precompiled_remote_versions` which uses compile-time cfg!() macros,
+    /// this takes a PlatformTarget to support cross-platform lockfile generation.
+    /// Respects precompiled_arch, precompiled_os, and precompiled_flavor settings
+    /// when the target matches the current platform.
+    async fn fetch_precompiled_for_target(
+        &self,
+        version: &str,
+        target: &PlatformTarget,
+    ) -> eyre::Result<Option<(String, String)>> {
+        let settings = Settings::get();
+
+        // Use settings-aware arch/os for the current platform,
+        // target-based defaults for other platforms
+        let (arch, os) = if target.is_current() {
+            (python_arch(&settings).to_string(), python_os(&settings))
+        } else {
+            (
+                python_arch_for_target(target).to_string(),
+                python_os_for_target(target).to_string(),
+            )
+        };
+
+        let platform = format!("{arch}-{os}");
+        let url_path = format!("python-precompiled-{arch}-{os}.gz");
+        let rsp = HTTP_FETCH
+            .get_bytes(format!("https://mise-versions.jdx.dev/tools/{url_path}"))
+            .await?;
+        let mut decoder = GzDecoder::new(rsp.as_ref());
+        let mut raw = String::new();
+        decoder.read_to_string(&mut raw)?;
+
+        let flavor = settings.python.precompiled_flavor.clone();
+
+        // Find all entries matching this version, then pick the best one
+        let result = raw
+            .lines()
+            .filter(|v| v.contains(&platform))
+            .filter(|v| filter_freethreaded(v, &flavor))
+            .flat_map(|v| {
+                regex!(r"^cpython-(\d+\.\d+\.[\da-z]+)\+(\d+).*")
+                    .captures(v)
+                    .map(|caps| {
+                        (
+                            caps[1].to_string(),
+                            caps[2].to_string(),
+                            caps[0].to_string(),
+                        )
+                    })
+            })
+            .filter(|(v, _, _)| v == version)
+            .min_by_key(|(_, date, name)| {
+                let install_type = if let Some(ref flavor) = flavor {
+                    // When flavor is set, prefer exact match
+                    let name_without_ext = name.trim_end_matches(".tar.gz");
+                    if name_without_ext.ends_with(flavor.as_str()) {
+                        0
+                    } else {
+                        1
+                    }
+                } else {
+                    // Default: prefer install_only_stripped > install_only > other
+                    if name.contains("install_only_stripped") {
+                        0
+                    } else if name.contains("install_only") {
+                        1
+                    } else {
+                        2
+                    }
+                };
+                let date = date.parse::<i64>().unwrap_or_default();
+                (install_type, -date)
+            })
+            .map(|(_, tag, filename)| (tag, filename));
+        Ok(result)
+    }
+
+    fn github_attestations_enabled() -> bool {
+        let settings = Settings::get();
+        settings
+            .python
+            .github_attestations
+            .unwrap_or(settings.github_attestations)
+    }
+
+    fn detect_precompiled_provenance(&self) -> Option<ProvenanceType> {
+        // Provenance only applies to precompiled binaries, not compiled-from-source.
+        // On Windows, precompiled is always used regardless of compile setting.
+        let uses_precompiled = cfg!(windows) || Settings::get().python.compile != Some(true);
+        if !uses_precompiled || !Self::github_attestations_enabled() {
+            return None;
+        }
+        Some(ProvenanceType::GithubAttestations)
+    }
+
+    fn has_precompiled_lockfile_integrity(tv: &ToolVersion, platform_key: &str) -> bool {
+        tv.lock_platforms
+            .get(platform_key)
+            .is_some_and(|pi| pi.checksum.is_some() && pi.provenance.is_some())
+    }
+
+    fn ensure_precompiled_provenance_setting_enabled(
+        tv: &ToolVersion,
+        platform_key: &str,
+    ) -> Result<()> {
+        crate::backend::ensure_provenance_setting_enabled(tv, platform_key, |provenance| {
+            match provenance {
+                ProvenanceType::GithubAttestations => Ok(!Self::github_attestations_enabled()),
+                _ => Err(eyre!(
+                    "Lockfile has unexpected provenance type {provenance} for python tool {tv}. \
+                     Update the lockfile to remove the stale provenance entry."
+                )),
+            }
+        })
+    }
+
+    async fn verify_precompiled_provenance(
+        &self,
+        ctx: &InstallContext,
+        tv: &mut ToolVersion,
+        platform_key: &str,
+        tarball_path: &std::path::Path,
+    ) -> Result<()> {
+        // Check lockfile provenance expectation before verification
+        let locked_provenance = tv
+            .lock_platforms
+            .get_mut(platform_key)
+            .and_then(|pi| pi.provenance.take());
+
+        // Verify GitHub artifact attestations for precompiled binaries
+        // Returns Ok(true) if verified, Ok(false) if skipped, Err if failed
+        let verified = self
+            .verify_github_artifact_attestations(ctx, tarball_path, &tv.version)
+            .await?;
+
+        // Record provenance only if verification actually succeeded (not skipped)
+        if verified {
+            let pi = tv
+                .lock_platforms
+                .entry(platform_key.to_string())
+                .or_default();
+            pi.provenance = Some(ProvenanceType::GithubAttestations);
+        }
+
+        // Enforce lockfile provenance
+        if let Some(ref expected) = locked_provenance {
+            let got = tv
+                .lock_platforms
+                .get(platform_key)
+                .and_then(|pi| pi.provenance.as_ref());
+            if got.is_none_or(|g| g != expected) {
+                let got_str = got
+                    .map(|g| g.to_string())
+                    .unwrap_or_else(|| "no verification".to_string());
+                return Err(eyre!(
+                    "Lockfile requires {expected} provenance for {tv} but {got_str} was used. \
+                     This may indicate a downgrade attack. Enable the corresponding verification setting \
+                     or update the lockfile."
+                ));
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn verify_github_artifact_attestations(
+        &self,
+        ctx: &InstallContext,
+        tarball_path: &std::path::Path,
+        version: &str,
+    ) -> Result<bool> {
+        if !Self::github_attestations_enabled() {
+            debug!("GitHub artifact attestations verification disabled for Python");
+            return Ok(false);
+        }
+
+        ctx.pr
+            .set_message("verify GitHub artifact attestations".to_string());
+
+        match crate::github::sigstore::verify_attestation(
+            tarball_path,
+            "astral-sh",
+            "python-build-standalone",
+            None, // Accept any workflow from repo
+            None,
+        )
+        .await
+        {
+            Ok(true) => {
+                ctx.pr
+                    .set_message("✓ GitHub artifact attestations verified".to_string());
+                debug!(
+                    "GitHub artifact attestations verified successfully for python@{}",
+                    version
+                );
+                Ok(true)
+            }
+            Ok(false) => Err(eyre!(
+                "GitHub artifact attestations verification failed for python@{version}\n{ATTESTATION_HELP}"
+            )),
+            Err(crate::github::sigstore::AttestationError::NoAttestations) => Err(eyre!(
+                "No GitHub artifact attestations found for python@{version}\n{ATTESTATION_HELP}"
+            )),
+            Err(e) => Err(eyre!(
+                "GitHub artifact attestations verification failed for python@{version}: {e}\n{ATTESTATION_HELP}"
+            )),
+        }
+    }
 }
 
 #[async_trait]
@@ -482,8 +724,14 @@ impl Backend for PythonPlugin {
         } else {
             self.install_or_update_python_build(None)?;
             let python_build_bin = self.python_build_bin();
-            plugins::core::run_fetch_task_with_timeout(move || {
-                let output = cmd!(python_build_bin, "--definitions").read()?;
+            let python_build_str = python_build_bin.to_string_lossy().to_string();
+            plugins::core::run_fetch_task_with_timeout_async(async move || {
+                let output = crate::cmd::cmd_read_async_inherited_env(
+                    &python_build_str,
+                    &["--definitions"],
+                    std::iter::empty::<(&str, &std::ffi::OsStr)>(),
+                )
+                .await?;
                 let versions = output
                     .split('\n')
                     // remove free-threaded pythons like 3.13t and 3.14t-dev
@@ -496,27 +744,57 @@ impl Backend for PythonPlugin {
                     .collect();
                 Ok(versions)
             })
+            .await
         }
     }
 
-    async fn idiomatic_filenames(&self) -> eyre::Result<Vec<String>> {
+    async fn _idiomatic_filenames(&self) -> eyre::Result<Vec<String>> {
         Ok(vec![
             ".python-version".to_string(),
             ".python-versions".to_string(),
         ])
     }
 
-    async fn install_version_(&self, ctx: &InstallContext, tv: ToolVersion) -> Result<ToolVersion> {
+    /// Python versions follow PEP 440, so `3.15.0a8`-style separator-less
+    /// alpha suffixes are pre-releases that the shared filter wouldn't catch
+    /// on its own. See `fuzzy_match_versions_pep440`.
+    fn fuzzy_match_filter(
+        &self,
+        versions: Vec<String>,
+        query: &str,
+        filter_prereleases: bool,
+    ) -> Vec<String> {
+        crate::backend::fuzzy_match_versions_pep440(versions, query, filter_prereleases)
+    }
+
+    async fn security_info(&self) -> Vec<crate::backend::SecurityFeature> {
+        use crate::backend::SecurityFeature;
+
+        let mut features = vec![SecurityFeature::Checksum {
+            algorithm: Some("sha256".to_string()),
+        }];
+
+        if self.detect_precompiled_provenance().is_some() {
+            features.push(SecurityFeature::GithubAttestations {
+                signer_workflow: None,
+            });
+        }
+
+        features
+    }
+
+    async fn install_version_(
+        &self,
+        ctx: &InstallContext,
+        mut tv: ToolVersion,
+    ) -> Result<ToolVersion> {
         if cfg!(windows) || Settings::get().python.compile != Some(true) {
-            self.install_precompiled(ctx, &tv).await?;
+            self.install_precompiled(ctx, &mut tv).await?;
         } else {
             self.install_compiled(ctx, &tv).await?;
         }
         self.test_python(&ctx.config, &tv, ctx.pr.as_ref()).await?;
-        if let Err(e) = self
-            .get_virtualenv(&ctx.config, &tv, Some(ctx.pr.as_ref()))
-            .await
-        {
+        if let Err(e) = self.get_virtualenv(&ctx.config, &tv).await {
             warn!("failed to get virtualenv: {e:#}");
         }
         if let Some(default_file) = &Settings::get().python.default_packages_file {
@@ -547,7 +825,7 @@ impl Backend for PythonPlugin {
         tv: &ToolVersion,
     ) -> eyre::Result<BTreeMap<String, String>> {
         let mut hm = BTreeMap::new();
-        match self.get_virtualenv(config, tv, None).await {
+        match self.get_virtualenv(config, tv).await {
             Err(e) => warn!("failed to get virtualenv: {e}"),
             Ok(Some(virtualenv)) => {
                 let bin = virtualenv.join("bin");
@@ -594,8 +872,9 @@ impl Backend for PythonPlugin {
             opts.insert("compile".to_string(), "true".to_string());
         }
 
-        // Only include precompiled options if not compiling and if set
-        if !compile && is_current_platform {
+        // Include precompiled options for all platforms to avoid splitting
+        // lockfile entries between host and non-host platforms (#8390)
+        if !compile {
             if let Some(arch) = settings.python.precompiled_arch.clone() {
                 opts.insert("precompiled_arch".to_string(), arch);
             }
@@ -608,6 +887,40 @@ impl Backend for PythonPlugin {
         }
 
         opts
+    }
+
+    async fn resolve_lock_info(
+        &self,
+        tv: &ToolVersion,
+        target: &PlatformTarget,
+    ) -> Result<PlatformInfo> {
+        let version = &tv.version;
+
+        // Look up the precompiled release for this version and target platform
+        let Some((tag, filename)) = self.fetch_precompiled_for_target(version, target).await?
+        else {
+            return Ok(PlatformInfo::default());
+        };
+
+        let url = format!(
+            "https://github.com/astral-sh/python-build-standalone/releases/download/{tag}/{filename}"
+        );
+
+        // Fetch SHA256SUMS from the release to get the checksum
+        let shasums_url = format!(
+            "https://github.com/astral-sh/python-build-standalone/releases/download/{tag}/SHA256SUMS"
+        );
+        let checksum = fetch_checksum_from_shasums(&shasums_url, &filename).await;
+
+        // Detect provenance for precompiled binaries
+        let provenance = self.detect_precompiled_provenance();
+
+        Ok(PlatformInfo {
+            url: Some(url),
+            checksum,
+            provenance,
+            ..Default::default()
+        })
     }
 }
 
@@ -632,7 +945,9 @@ fn python_os(settings: &Settings) -> String {
     } else if cfg!(target_os = "macos") {
         "apple-darwin".into()
     } else {
-        ["unknown", built_info::CFG_OS, built_info::CFG_ENV]
+        let current = Platform::current();
+        let libc = current.libc().unwrap_or("gnu");
+        ["unknown", built_info::CFG_OS, libc]
             .iter()
             .filter(|s| !s.is_empty())
             .join("-")
@@ -643,14 +958,19 @@ fn python_arch(settings: &Settings) -> &str {
     if let Some(arch) = &settings.python.precompiled_arch {
         return arch.as_str();
     }
-    let arch = match settings.arch() {
+    let arch = settings.arch();
+    resolve_python_arch(std::env::consts::OS, arch)
+}
+
+fn resolve_python_arch<'a>(os: &str, arch: &'a str) -> &'a str {
+    let arch = match arch {
         "x64" => "x86_64",
         "arm64" => "aarch64",
         other => other,
     };
-    if cfg!(windows) {
+    if os == "windows" && arch != "aarch64" {
         "x86_64"
-    } else if cfg!(linux) && arch == "x86_64" {
+    } else if os == "linux" && arch == "x86_64" {
         if cfg!(target_feature = "avx512f") {
             "x86_64_v4"
         } else if cfg!(target_feature = "avx2") {
@@ -676,6 +996,23 @@ fn python_precompiled_platform() -> String {
     }
 }
 
+/// Map a PlatformTarget OS to the python-build-standalone OS string.
+fn python_os_for_target(target: &PlatformTarget) -> String {
+    match target.os_name() {
+        "macos" => "apple-darwin".to_string(),
+        "windows" => "pc-windows-msvc".to_string(),
+        _ => format!("unknown-linux-{}", target.libc().unwrap_or("gnu")),
+    }
+}
+
+/// Map a PlatformTarget arch to the python-build-standalone arch string.
+fn python_arch_for_target(target: &PlatformTarget) -> &'static str {
+    match target.arch_name() {
+        "arm64" => "aarch64",
+        _ => "x86_64",
+    }
+}
+
 fn ensure_not_windows() -> eyre::Result<()> {
     if cfg!(windows) {
         bail!(
@@ -683,4 +1020,55 @@ fn ensure_not_windows() -> eyre::Result<()> {
         );
     }
     Ok(())
+}
+
+fn filter_freethreaded(v: &str, flavor: &Option<String>) -> bool {
+    flavor.as_ref().is_some_and(|f| f.contains("freethreaded")) || !v.contains("freethreaded")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_resolve_python_arch_windows_x64() {
+        assert_eq!(resolve_python_arch("windows", "x64"), "x86_64");
+        assert_eq!(resolve_python_arch("windows", "x86_64"), "x86_64");
+    }
+
+    #[test]
+    fn test_resolve_python_arch_windows_arm64() {
+        assert_eq!(resolve_python_arch("windows", "arm64"), "aarch64");
+        assert_eq!(resolve_python_arch("windows", "aarch64"), "aarch64");
+    }
+
+    #[test]
+    fn test_resolve_python_arch_linux_x64() {
+        // Exact variant depends on CPU features at compile time,
+        // but it should always start with "x86_64"
+        assert!(resolve_python_arch("linux", "x64").starts_with("x86_64"));
+    }
+
+    #[test]
+    fn test_resolve_python_arch_linux_arm64() {
+        assert_eq!(resolve_python_arch("linux", "arm64"), "aarch64");
+    }
+
+    #[test]
+    fn test_resolve_python_arch_macos() {
+        assert_eq!(resolve_python_arch("macos", "arm64"), "aarch64");
+        assert_eq!(resolve_python_arch("macos", "x64"), "x86_64");
+    }
+
+    #[test]
+    fn test_python_os_for_target_linux_libc() {
+        use crate::backend::platform_target::PlatformTarget;
+        use crate::platform::Platform;
+
+        let target = PlatformTarget::new(Platform::parse("linux-x64").unwrap());
+        assert_eq!(python_os_for_target(&target), "unknown-linux-gnu");
+
+        let target = PlatformTarget::new(Platform::parse("linux-x64-musl").unwrap());
+        assert_eq!(python_os_for_target(&target), "unknown-linux-musl");
+    }
 }
